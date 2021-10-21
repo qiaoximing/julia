@@ -1,5 +1,6 @@
-using LightGraphs, MetaGraphs
+using LightGraphs
+using Plots
 
-g = path_graph(5)
-
-mg = MetaGraph(g, 3.0)
+@gif for i in 1:10
+    plot(sin.(1:0.1:i))
+end

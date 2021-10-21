@@ -1,0 +1,110 @@
+function sample_and_update!(dgroup::Group{Distr}, result::Int, state::State, net::Net)
+    for distr in dgroup.factors
+        node = distr.node
+        axis = distr.targ
+        # update tree fields
+        if axis == Edge
+            node.edge = Etype(result) # Etype starts from 1
+        elseif axis == Left
+            node.left, distrs = tree_init(result, net.size)
+            new_dgroups = [group_init(d) for d in distrs if sum(d.prob)>0]
+            append!(state.dgroups, new_dgroups)
+        elseif axis == Right
+            node.right, distrs = tree_init(result, net.size)
+            new_dgroups = [group_init(d) for d in distrs if sum(d.prob)>0]
+            append!(state.dgroups, new_dgroups)
+        elseif axis == Input
+            node.input = result
+        elseif axis == Output
+            node.output = result
+        elseif axis == Node
+            lrp = distr.lrp
+            # TODO
+        end
+        # update conditioning
+        push!(node.conds, (axis, result))
+        for d in (node.edge, node.left, node.right, node.input, node.output)
+            if d isa Distr
+                vals = getval(net, d.targ, node.conds)
+                new_prob = vals / sum(vals)
+                if d.enable 
+                    d.group.prod /= d
+                    d.prob = new_prob
+                    d.group.prod *= d
+                    d.group.score = score(d.group.prod)
+                else
+                    d.prob = new_prob
+                end
+            end
+        end
+        # update grouping and propagate shared values
+        if node.edge isa Etype
+            if node.edge == L # composition
+                if node.left isa Tree
+                    disable!(node.input)
+                    link!(node.input, node.left.input, state)
+                end
+                if node.right isa Tree
+                    disable!(node.output)
+                    link!(node.output, node.right.output, state)
+                end
+                if node.left isa Tree && node.right isa Tree
+                    link!(node.left.output, node.right.input, state)
+                end
+            elseif node.edge == D # broadcast
+                if node.left isa Tree
+                    disable!(node.input)
+                    link!(node.input, node.left.input, state)
+                end
+                if node.right isa Tree
+                    disable!(node.input)
+                    link!(node.input, node.right.input, state)
+                    disable!(node.output)
+                    link!(node.output, node.right.output, state)
+                end
+            elseif node.edge == F # final
+                # disable!(node.input)
+                # link!(node.input, node.left)
+                # disable!(node.output)
+                # link!(node.output, node.right)
+                # for t in (node.left, node.right)
+                #     if t isa Tree # stop further expansion
+                #         t.left = nothing
+                #         t.right = nothing
+                #     end
+                # end
+            end
+        end
+    end
+end
+
+    # options include expansions
+    append!(state.options, [Option([dg]) for dg in dgroups])
+    # root-root merge
+    if length(state.trees) > 1
+        root1 = state.rroots[end-1]
+        root2 = state.lroots[end]
+        if root1!==nothing && root2!==nothing
+            push!(state.options, Option([root1, root2]))
+        end
+    end
+    # leaf-root merge
+    if length(state.trees) > 1
+        for root in (state.lroots[end], state.rroots[end])
+            if root!==nothing
+                for leaf in state.rslots[end-1]
+                    push!(state.options, Option([leaf, root]))
+                end
+            end
+        end
+    end
+    # leaf-root-root merge
+    if length(state.trees) > 2
+        root1 = state.rroots[end-1]
+        root2 = state.lroots[end]
+        if root1!==nothing && root2!==nothing
+            for leaf in state.rslots[end-2]
+                push!(state.options, Option([leaf, root1, root2]))
+            end
+        end
+    end
