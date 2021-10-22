@@ -1,3 +1,4 @@
+using Printf
 include("net.jl")
 include("tree.jl")
 include("utility.jl")
@@ -14,7 +15,7 @@ function state_init(net::Net)
     lslots = [[]] # no lslot for root
     # get all leaves for rslot
     rslots = [[dg for dg in dgroups if dg.factors[1].targ in (Left, Right)]]
-    return State(trees, lroots, rroots, expans, lslots, rslots)
+    return State(trees, expans, lroots, rroots, lslots, rslots)
 end
 
 function shift!(state::State, net::Net, item)
@@ -38,11 +39,11 @@ function add_condition!(node::Tree, axis::Axes, result::Int, net::Net)
     # add conditioning to related Distrs, this will not affect l/rparent
     for d in (node.edge, node.left, node.right, node.input, node.output)
         if d isa Distr
-            if d.enable # update the related group
+            if d.enable && d.group!==nothing # update the related group
                 d.group.prod /= d
             end
             add_condition!(d, net, node.conds)
-            if d.enable
+            if d.enable && d.group!==nothing
                 d.group.prod *= d
                 d.group.score = score(d.group.prod)
             end
@@ -52,8 +53,8 @@ end
 
 # update all inputs and/or outputs in a dgroup, and clean up state
 function update_io!(dgroup::Group{Distr}, result::Int, state::State, net::Net)
-    node = distr.node
     for distr in dgroup.factors # include both enabled and disabled
+        node = distr.node
         axis = distr.targ
         if axis == Input
             if node.input isa Int
@@ -68,12 +69,13 @@ function update_io!(dgroup::Group{Distr}, result::Int, state::State, net::Net)
         end
         add_condition!(node, axis, result, net)
     end
-    tree_idx = findfirst(x->x===node.root, state.trees)
+    tree = dgroup.factors[1].node.root
+    tree_idx = findfirst(x->x===tree, state.trees)
     deletefirst!(x->x===dgroup, state.expans[tree_idx])
 end
 
 # link two I/O dgroups or values, clean up state
-function link_io!(node::Tree, d1, d2, state::State)
+function link_io!(node::Tree, d1, d2, state::State, net::Net)
     if d1 isa Distr && d2 isa Distr
         g1, g2 = d1.group, d2.group
         if g1 !== g2
@@ -91,7 +93,37 @@ function link_io!(node::Tree, d1, d2, state::State)
     end
 end
 
-# update node.edge, link relevant input/outputs, and clean up state
+# given an edge, link relevant input/outputs, and clean up state
+function trigger_edge!(node::Tree, state::State, net::Net)
+    if node.edge isa Etype
+        if node.edge == B # composition
+            if node.left isa Tree
+                disable!(node.input)
+                link_io!(node, node.input, node.left.input, state, net)
+            end
+            if node.right isa Tree
+                disable!(node.output)
+                link_io!(node, node.output, node.right.output, state, net)
+            end
+            if node.left isa Tree && node.right isa Tree
+                link_io!(node, node.left.output, node.right.input, state, net)
+            end
+        elseif node.edge == D # duplicate
+            if node.left isa Tree
+                disable!(node.input)
+                link_io!(node, node.input, node.left.input, state, net)
+            end
+            if node.right isa Tree
+                disable!(node.input)
+                link_io!(node, node.input, node.right.input, state, net)
+                disable!(node.output)
+                link_io!(node, node.output, node.right.output, state, net)
+            end
+        end
+    end
+end
+
+# update node.edge, 
 function update_edge!(dgroup::Group{Distr}, result::Int, state::State, net::Net)
     node = dgroup.prod.node
     if node.edge isa Etype
@@ -101,37 +133,14 @@ function update_edge!(dgroup::Group{Distr}, result::Int, state::State, net::Net)
     add_condition!(node, Edge, result, net)
     tree_idx = findfirst(x->x===node.root, state.trees)
     deletefirst!(x->x===dgroup, state.expans[tree_idx])
-    if node.edge == B # composition
-        if node.left isa Tree
-            disable!(node.input)
-            link_io!(node, node.input, node.left.input, state)
-        end
-        if node.right isa Tree
-            disable!(node.output)
-            link_io!(node, node.output, node.right.output, state)
-        end
-        if node.left isa Tree && node.right isa Tree
-            link_io!(node, node.left.output, node.right.input, state)
-        end
-    elseif node.edge == D # duplicate
-        if node.left isa Tree
-            disable!(node.input)
-            link_io!(node, node.input, node.left.input, state)
-        end
-        if node.right isa Tree
-            disable!(node.input)
-            link_io!(node, node.input, node.right.input, state)
-            disable!(node.output)
-            link_io!(node, node.output, node.right.output, state)
-        end
-    end
+    trigger_edge!(node, state, net)
 end
 
 # create a new node at idx and return it, update state
 # TODO: optimize by replacing Array with Dict
 function create_node_at!(node::Tree, result::Int, state::State, net::Net)
     idx = findfirst(x->x===node.root, state.trees)
-    tree, distrs = tree_init(result, net.size) 
+    tree, distrs = tree_init(result, net, :normal) 
     dgroups = [group_init(d) for d in distrs if sum(d.prob)>0]
     # state update
     insert!(state.trees, idx, tree)
@@ -140,8 +149,8 @@ function create_node_at!(node::Tree, result::Int, state::State, net::Net)
     insert!(state.lroots, idx, getfirst(x->x.factors[1]===tree.lparent, dgroups))
     insert!(state.rroots, idx, getfirst(x->x.factors[1]===tree.rparent, dgroups))
     # allow overlapping l/r slots for unobserved nodes
-    insert!(state.lslots, idx, [[dg for dg in dgroups if dg.factors[1].targ in (Left, Right)]])
-    insert!(state.rslots, idx, [[dg for dg in dgroups if dg.factors[1].targ in (Left, Right)]])
+    insert!(state.lslots, idx, [dg for dg in dgroups if dg.factors[1].targ in (Left, Right)])
+    insert!(state.rslots, idx, [dg for dg in dgroups if dg.factors[1].targ in (Left, Right)])
     return tree
 end
 
@@ -179,8 +188,8 @@ function connect!(node1::Tree, node2::Tree, axis::Axes, state::State, net::Net, 
     deleteat!(state.rroots, t2_idx)
     # remove slots and rearrange
     for (slots1, slots2) in ((state.lslots[t1_idx], state.lslots[t2_idx]),
-                                (state.rslots[t1_idx], state.rslots[t2_idx]))
-        slot_idx = findfirst(x->(x.prod.node===node1 && x.prod.targ==axis), slots)
+                             (state.rslots[t1_idx], state.rslots[t2_idx]))
+        slot_idx = findfirst(x->(x.prod.node===node1 && x.prod.targ==axis), slots1)
         if slot_idx!==nothing
             if observed == false # replace the used slot with slots2
                 slots1 = [slots1[1:slot_idx-1]; slots2; slots1[slot_idx+1:end]]
@@ -195,11 +204,14 @@ function connect!(node1::Tree, node2::Tree, axis::Axes, state::State, net::Net, 
     deleteat!(state.rslots, t2_idx)
     # remove trees
     deleteat!(state.trees, t2_idx)
+    # try to merge or propagate I/O dgroups
+    # note: must run this step after the state update
+    trigger_edge!(node1, state, net)
 end
 
 function run_option!(option::Option, result::Int, state::State, net::Net)
     lrpLR(lrp::Bool) = lrp ? Left : Right
-    if length(option.dgroups == 1)
+    if length(option.dgroups) == 1
         dg = option.dgroups[1]
         node, targ = dg.prod.node, dg.prod.targ
         if targ == Edge
@@ -217,7 +229,7 @@ function run_option!(option::Option, result::Int, state::State, net::Net)
                 connect!(new_node, node, lrpLR(dg.prod.lrp), state, net)
             end
         end
-    elseif length(option.dgroups == 2)
+    elseif length(option.dgroups) == 2
         dg1, dg2 = option.dgroups
         node1, targ1 = dg1.prod.node, dg1.prod.targ
         node2, targ2 = dg2.prod.node, dg2.prod.targ
@@ -234,7 +246,7 @@ function run_option!(option::Option, result::Int, state::State, net::Net)
         else
             warning("invalid merge")
         end
-    elseif length(option.dgroups == 3)
+    elseif length(option.dgroups) == 3
         dg1, dg2, dg3 = option.dgroups
         node1, targ1 = dg1.prod.node, dg1.prod.targ
         node2, targ2 = dg2.prod.node, dg2.prod.targ
@@ -254,19 +266,19 @@ function run_option!(option::Option, result::Int, state::State, net::Net)
     end
 end
 
-function parse(net, data)
+function parse(net::Net, data::String, max_steps::Int=10)
     state = state_init(net)
     prob = 0.0
     # first shift in all data
     for item in data
         shift!(state, net, item)
     end
-    println(state)
     # repeat until all merged and sampled
-    max_steps = 3
     success = false
+    state_repr = "[]"
     for step in 1:max_steps
         options = get_all_options(state)
+        println(options)
         if length(options) == 0
             success = length(state.trees) == 1
             break 
@@ -274,15 +286,19 @@ function parse(net, data)
         option_idx = sample(options) # select an option
         option = options[option_idx]
         result = sample(option.prod) # sample a result from the option
+        println(option, "->", option.prod, "->", result)
         run_option!(option, result, state, net)
-        println("step $step:")
-        println(state)
+        print("step $step: ")
+        state_repr_ = repr(state.trees)
+        # println("repr:", state_repr)
+        println_diff(state_repr_, state_repr)
+        state_repr = state_repr_
     end
     if !success prob = 0.0 end
     return state, prob
 end
 
-function learn_step!(net, node, prob)
+function learn_step!(net::Net, node::Tree, prob::Float64)
     idx = (Int(node.edge), node.node, node.left, node.right, 
            node.input, node.output)
     if idx isa NTuple{6, Int}
@@ -290,7 +306,7 @@ function learn_step!(net, node, prob)
     end
 end
 
-function learn!(net, state, prob, decay=1.0)
+function learn!(net::Net, state::State, prob::Float64, decay::Float64=1.0)
     # traverse the tree and update net by prob
     for tree in state.trees
         traverse(node -> learn_step!(net, node, prob), tree)
@@ -305,13 +321,13 @@ end
 
 function main()
     net = bmm_net_init()
-    bmm_dataset = ["01"]
+    bmm_dataset = ["01T"]
     # bmm_dataset = ["00", "01", "10", "11"]
     datasampler(dataset) = rand(dataset)
     num_data = 1
     for i in 1:num_data
         data = datasampler(bmm_dataset)
-        state, prob = parse(net, data)
+        state, prob = parse(net, data, 10)
         println(data,':', prob)
         if prob > 0
             learn!(net, state, prob)

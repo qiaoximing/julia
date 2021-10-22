@@ -20,11 +20,11 @@ mutable struct Distr{T<:AbstractTree}
     prob::Vector{Float64}
 end
 
-normalize(x) = x / sum(x)
-Base.:(*)(x::Distr, y::Distr) = Distr(x.node, x.group, x.enable, x.targ, x.lrp, normalize(x.prob .* y.prob))
 safediv(x::T, y::T) where T <: Number = y != 0 ? x / y : zero(T)
+normalize(x) = safediv.(x, sum(x))
+Base.:(*)(x::Distr, y::Distr) = Distr(x.node, x.group, x.enable, x.targ, x.lrp, normalize(x.prob .* y.prob))
 Base.:(/)(x::Distr, y::Distr) = Distr(x.node, x.group, x.enable, x.targ, x.lrp, normalize(safediv.(x.prob, y.prob)))
-score(x::Distr) = -sum(x.prob .* log.(x.prob))
+score(x::Distr) = begin p = filter(t->t>0, x.prob); return sum(p .* log.(p)) end
 function sample(x::Vector{Float64})
     r = rand() # random float in [0, 1)
     i = 0
@@ -110,11 +110,11 @@ function tree_init(node::Int, net::Net, type=:normal)
         push!(tree.conds, (Output, tree.output))
         tree.input = distr_init(tree, Input, n_nodes)
         add_condition!(tree.input, net, tree.conds)
-        tree.lparent = distr_init(tree, Node, n_nodes, 0)
+        tree.lparent = distr_init(tree, Node, n_nodes, false)
         add_condition!(tree.lparent, net, [(Right, node)])
-        tree.rparent = distr_init(tree, Node, n_nodes, 1)
+        tree.rparent = distr_init(tree, Node, n_nodes, true)
         add_condition!(tree.rparent, net, [(Left, node)])
-        distrs = (input, lparent, rparent)
+        distrs = (tree.input, tree.lparent, tree.rparent)
     elseif type == :root
         tree.input = net.init # constant input
         push!(tree.conds, (Input, tree.input))
@@ -140,9 +140,9 @@ function tree_init(node::Int, net::Net, type=:normal)
         add_condition!(tree.left, net, tree.conds)
         tree.right = distr_init(tree, Right, n_nodes)
         add_condition!(tree.right, net, tree.conds)
-        tree.lparent = distr_init(tree, Node, n_nodes, 0)
+        tree.lparent = distr_init(tree, Node, n_nodes, false)
         add_condition!(tree.lparent, net, [(Right, node)])
-        tree.rparent = distr_init(tree, Node, n_nodes, 1)
+        tree.rparent = distr_init(tree, Node, n_nodes, true)
         add_condition!(tree.rparent, net, [(Left, node)])
         distrs = (tree.edge, tree.input, tree.output, tree.left, tree.right,
                   tree.lparent, tree.rparent)
@@ -165,13 +165,19 @@ mutable struct Option
     score::Float64 # score of product
 end
 function Option(dgroups::Vector{Group{Distr}})
-    prod = prod(dgroups)
-    score = score(prod)
-    return Option(dgroups, prod, score)
+    opt_prod = prod([dg.prod for dg in dgroups])
+    if sum(opt_prod.prob) == 0
+        return nothing
+    else
+        opt_score = score(opt_prod)
+        return Option(dgroups, opt_prod, opt_score)
+    end
 end
 
 # evaluate all options and return a Vector{Option}
 function get_all_options(state::State)
+    safepush!(x, i::Nothing) = i
+    safepush!(x, i::Option) = push!(x, i)
     # expansions
     allexpans = vcat(state.expans...)
     options = [Option([dgroup]) for dgroup in allexpans]
@@ -180,19 +186,19 @@ function get_all_options(state::State)
         # root-root
         root1, root2 = state.rroots[i], state.lroots[i+1]
         if root1!==nothing && root2!==nothing
-            push!(options, Option([root1, root2]))
+            safepush!(options, Option([root1, root2]))
         end
         # leaf-root
         for leaf in state.rslots[i]
             for root in (state.lroots[i+1], state.rroots[i+1])
                 if root!==nothing
-                    push!(options, Option([leaf, root]))
+                    safepush!(options, Option([leaf, root]))
         end end end
         # root-leaf
         for root in (state.lroots[i], state.rroots[i])
             if root!==nothing
                 for leaf in state.lslots[i+1]
-                    push!(options, Option([root, leaf]))
+                    safepush!(options, Option([root, leaf]))
         end end end
     end
     # merge three trees
@@ -201,15 +207,16 @@ function get_all_options(state::State)
         for leaf in state.rslots[i-1]
             root1, root2 = state.rroots[i], state.lroots[i+1]
             if root1!==nothing && root2!==nothing
-                push!(options, Option([leaf, root1, root2]))
+                safepush!(options, Option([leaf, root1, root2]))
         end end
         # root-root-leaf
         root1, root2 = state.rroots[i-1], state.lroots[i]
         if root1!==nothing && root2!==nothing
             for leaf in state.rslots[i+1]
-                push!(options, Option([root1, root2, leaf]))
+                safepush!(options, Option([root1, root2, leaf]))
         end end
     end
+    return options
 end
 
 function sample(options::Vector{Option})

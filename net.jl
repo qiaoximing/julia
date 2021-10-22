@@ -85,7 +85,9 @@ function add!(net::Net{Float64}, idx_raw, x)
     ndim = length(net.size)
     for b in keys(net.b2i)
         subidx = Tuple([idx[i] for i in 1:ndim if b[i]==1])
-        net.data[b][subidx...] += x
+        if !(0 in subidx)
+            net.data[b][subidx...] += x
+        end
     end
 end
 
@@ -112,18 +114,25 @@ end
 
 # Bernoulli mixture model with shared emission 
 function bmm_net_init()
-    net = net_init(10, "01T") # inputs always terminate with 'T'
+    n_nodes = 10
+    net = net_init(n_nodes, "01T") # inputs always terminate with 'T'
     # Etype: L D
     # Axes: Edge Node Left Right Input Output
     R, I = net.root, net.init
     p0, p1, T = '0', '1', 'T'
     A = net.prints['T'] + 1
     S, s0, s1 = A+1:A+3
+    if s1 > n_nodes warning("need more nodes") end
+    println("Net config: 1=R 2=I 3=p0 4=p1 5=T $A=A $S=S $s0=s0 $s1=s1")
     add!(net, (B, R, S, A, I, T), 100) 
     add!(net, (D, A, p0, A, s0, T), 45)
     add!(net, (D, A, p0, A, s1, T), 5)
     add!(net, (D, A, p1, A, s0, T), 5)
     add!(net, (D, A, p1, A, s1, T), 45)
+    add!(net, (D, A, p0, T, s0, T), 45)
+    add!(net, (D, A, p0, T, s1, T), 5)
+    add!(net, (D, A, p1, T, s0, T), 5)
+    add!(net, (D, A, p1, T, s1, T), 45)
     add!(net, (0, S, 0, 0, I, s0), 50) 
     add!(net, (0, S, 0, 0, I, s1), 50)
     add!(net, (0, p0, 0, 0, s0, p0), 90)

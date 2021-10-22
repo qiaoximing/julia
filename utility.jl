@@ -3,14 +3,14 @@ function getfirst(f::Function, x)
     if i === nothing 
         return nothing 
     else
-        return f[i]
+        return x[i]
     end
 end
 
 function deletefirst!(f::Function, x)
     i = findfirst(f, x)
     if i === nothing 
-        println("ERROR: deletefirst fails")
+        warning("deletefirst fails")
     else
         deleteat!(x, i)
     end
@@ -23,59 +23,87 @@ function deleteall!(f::Function, x)
     end
 end
 
-function warning(msg::AbstractString)
+function warning(msg::String)
     printstyled("WARNING: ", bold=true, color=:yellow)
     println(msg)
 end
 
-function Base.show(io::IO,x::AbstractArray)
-    print('[')
-    for i in x[1:end-1]
-        print(i, ", ")
+# print str1 and highlight the difference comparing to str2
+function println_diff(str1::String, str2::String)
+    i, j, l = 1, 0, min(length.((str1, str2))...)
+    while i < l && str1[i] == str2[i]
+        i += 1
     end
-    print(x[end], ']')
+    while j < l && str1[end-j] == str2[end-j]
+        j += 1
+    end
+    print(str1[1:i-1])
+    printstyled(str1[i:end-j], color=:red)
+    print(str1[end-j+1:end])
+    println()
 end
 
-Base.show(io::IO,x::Group) = print(x.factors)
+function Base.show(io::IO, x::AbstractArray)
+    print(io, '[')
+    if !isempty(x)
+        for i in x[1:end-1]
+            print(io, i, ", ")
+        end
+        print(io, x[end], ']')
+    else
+        print(io, ']')
+    end
+end
 
-Base.show(io::IO,x::Distr) = print(x.targ, ":", x.prob)
+Base.show(io::IO, x::Group) = print(io, x.factors)
 
-Base.show(io::IO,x::State) = print(x.trees, '\n', x.dgroups)
+Base.show(io::IO, x::Distr) = print(io, x.prob)
 
-function Base.show(io::IO,x::Tree)
-    print("Tree:", x.node, "->")
-    print('e')
+Base.show(io::IO, x::State) = print(io, x.trees, '\n', x.expans)
+
+function Base.show(io::IO, x::Tree)
+    print(io, "T", x.node, "->")
     if x.edge isa Etype
-        print(x.edge)
+        print(io, x.edge)
     else
-        print('?')
+        print(io, '?')
     end
-    print('l')
     if x.left isa Tree
-        print(x.left.node)
+        print(io, '(', x.left, ')')
     elseif x.left isa Nothing
-        print('*')
+        print(io, "()")
     else
-        print('?')
+        print(io, "(?)")
     end
-    print('r')
     if x.right isa Tree
-        print(x.right.node)
+        print(io, '(', x.right, ')')
     elseif x.right isa Nothing
-        print('*')
+        print(io, "()")
     else
-        print('?')
+        print(io, "(?)")
     end
-    print('i')
+    print(io, 'i')
     if x.input isa Int
-        print(x.input)
+        print(io, x.input)
     else
-        print('?')
+        print(io, '?')
     end
-    print('o')
+    print(io, 'o')
     if x.output isa Int
-        print(x.output)
+        print(io, x.output)
     else
-        print('?')
+        print(io, '?')
     end
+end
+
+function Base.show(io::IO, x::Option)
+    print(io, '[')
+    for i in 1:length(x.dgroups)-1
+        print(io, x.dgroups[i].prod.node.node, ',')
+    end
+    print(io, x.dgroups[end].prod.node.node, "]-")
+    print(x.prod.targ, '-')
+    # print(x.prod, '-')
+    @printf("%.2f", x.score)
+    # println()
 end
