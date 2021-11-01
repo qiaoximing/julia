@@ -25,6 +25,7 @@ normalize(x) = safediv.(x, sum(x))
 Base.:(*)(x::Distr, y::Distr) = Distr(x.node, x.group, x.enable, x.targ, x.lrp, normalize(x.prob .* y.prob))
 Base.:(/)(x::Distr, y::Distr) = Distr(x.node, x.group, x.enable, x.targ, x.lrp, normalize(safediv.(x.prob, y.prob)))
 score(x::Distr) = begin p = filter(t->t>0, x.prob); return sum(p .* log.(p)) end
+# Optimize: for a fixed distribution, use binary search to speed up
 function sample(x::Vector{Float64})
     r = rand() # random float in [0, 1)
     i = 0
@@ -33,7 +34,7 @@ function sample(x::Vector{Float64})
         r -= x[i]
     end
     # note: concentrate to length(x) if sum(x) < 1
-    return i
+    return i, x[i]
 end
 sample(x::Distr) = sample(x.prob)
 
@@ -157,6 +158,7 @@ mutable struct State
     rroots::Vector{Union{Group{Distr}, Nothing}} # right roots
     lslots::Vector{Vector{Group{Distr}}} # left merge slots
     rslots::Vector{Vector{Group{Distr}}} # right merge slots
+    success::Bool # terminal the parse when fail
 end
 
 mutable struct Option
@@ -219,13 +221,13 @@ function get_all_options(state::State)
     return options
 end
 
-function sample(options::Vector{Option})
+function sample(options::Vector{Option}, temp::Number)
     scores = [option.score for option in options]
     # linear probability
     # prob = normalize(scores)
     # softmax score
-    softmax(x, t=1) = normalize(exp.(t * x))
-    prob = softmax(scores)
+    softmax(x, t) = normalize(exp.(t * x))
+    prob = softmax(scores, temp)
     return sample(prob)
 end
 

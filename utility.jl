@@ -55,7 +55,9 @@ function Base.show(io::IO, x::AbstractArray)
     end
 end
 
-Base.show(io::IO, x::Group) = print(io, x.factors)
+Base.show(io::IO, x::Group) = print(io, x.prod.node.node, "->", 
+                                    # x.prod.targ, ": ", x.factors)
+                                    x.prod.targ)
 
 Base.show(io::IO, x::Distr) = print(io, x.prob)
 
@@ -106,4 +108,9 @@ function Base.show(io::IO, x::Option)
     # print(x.prod, '-')
     @printf("%.2f", x.score)
     # println()
+end
+
+function Base.show(io::IO, x::Net)
+    array = x.data[(1,1,1,1,1,1)]
+    print(io, array.data)
 end

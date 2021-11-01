@@ -1,4 +1,6 @@
+const DEBUG = true
 using Printf
+using Random
 include("net.jl")
 include("tree.jl")
 include("utility.jl")
@@ -15,7 +17,7 @@ function state_init(net::Net)
     lslots = [[]] # no lslot for root
     # get all leaves for rslot
     rslots = [[dg for dg in dgroups if dg.factors[1].targ in (Left, Right)]]
-    return State(trees, expans, lroots, rroots, lslots, rslots)
+    return State(trees, expans, lroots, rroots, lslots, rslots, true)
 end
 
 function shift!(state::State, net::Net, item)
@@ -89,7 +91,8 @@ function link_io!(node::Tree, d1, d2, state::State, net::Net)
     elseif d2 isa Distr && d1 isa Int
         update_io!(d2.group, d1, state, net)
     elseif d1 !== d2 # both are Ints
-        warning("attempt to link two different values")
+        # warning("attempt to link two different values")
+        state.success = false
     end
 end
 
@@ -187,17 +190,19 @@ function connect!(node1::Tree, node2::Tree, axis::Axes, state::State, net::Net, 
     deleteat!(state.lroots, t2_idx)
     deleteat!(state.rroots, t2_idx)
     # remove slots and rearrange
-    for (slots1, slots2) in ((state.lslots[t1_idx], state.lslots[t2_idx]),
-                             (state.rslots[t1_idx], state.rslots[t2_idx]))
+    for slots in (state.lslots, state.rslots)
+        slots1, slots2 = slots[t1_idx], slots[t2_idx]
         slot_idx = findfirst(x->(x.prod.node===node1 && x.prod.targ==axis), slots1)
         if slot_idx!==nothing
+            # println("Before:", slots1)
             if observed == false # replace the used slot with slots2
-                slots1 = [slots1[1:slot_idx-1]; slots2; slots1[slot_idx+1:end]]
+                slots[t1_idx] = [slots1[1:slot_idx-1]; slots2; slots1[slot_idx+1:end]]
             elseif axis == Left # lslots1 to the left then lslots2
-                slots1 = [slots1[1:slot_idx-1]; slots2]
+                slots[t1_idx] = [slots1[1:slot_idx-1]; slots2]
             elseif axis == Right # rslots2 then rslots1 to the right
-                slots1 = [slots2; slots2[slot_idx+1:end]]
+                slots[t1_idx] = [slots2; slots1[slot_idx+1:end]]
             end
+            # println("After:", slots1)
         end
     end
     deleteat!(state.lslots, t2_idx)
@@ -266,72 +271,158 @@ function run_option!(option::Option, result::Int, state::State, net::Net)
     end
 end
 
-function parse(net::Net, data::String, max_steps::Int=10)
+# evaluate the posterior probability of a tree
+function eval_logp(node::Tree, net::Net, leftmost::Bool)
+    logp_left, logp_right, logp_node = 0.0, 0.0, 0.0
+    # leaf node
+    if !(node.left isa Tree || node.right isa Tree)
+        arrayidx = (0, 1, 0, 0, 1, 1)
+        idx = (node.node, node.input, node.output)
+        val = net.data[arrayidx][idx...]
+        if leftmost
+            arrayidx = (0, 1, 0, 0, 0, 0)
+            idx = (node.node)
+        else
+            arrayidx = (0, 1, 0, 0, 1, 0)
+            idx = (node.node, node.input)
+        end
+        Z = net.data[arrayidx][idx...]
+        logp_node = log(val / Z)
+    # middle node
+    elseif node.left isa Tree && node.right isa Tree
+        if node.edge isa Etype
+            arrayidx = (1, 1, 1, 1, 0, 0)
+            idx = (Int(node.edge), node.node, node.left.node, node.right.node)
+            val = net.data[arrayidx][idx...]
+            arrayidx = (1, 1, 0, 0, 0, 0)
+            idx = (Int(node.edge), node.node)
+            Z = net.data[arrayidx][idx...]
+        else
+            # warning("evaluating an unsampled edge")
+            arrayidx = (0, 1, 1, 1, 0, 0)
+            idx = (node.node, node.left.node, node.right.node)
+            val = net.data[arrayidx][idx...]
+            arrayidx = (0, 1, 0, 0, 0, 0)
+            idx = (node.node)
+            Z = net.data[arrayidx][idx...]
+        end
+        logp_node = log(val / Z)
+        logp_left = eval_logp(node.left, net, leftmost)
+        logp_right = eval_logp(node.right, net, false)
+    else
+        warning("evaluating an incomplete tree")
+    end
+    return logp_left + logp_right + logp_node
+end
+
+function parse(net::Net, data::String, max_steps::Int, temp::Number)
     state = state_init(net)
-    prob = 0.0
+    logq = 0.0 # proposal probability
     # first shift in all data
     for item in data
         shift!(state, net, item)
     end
     # repeat until all merged and sampled
-    success = false
+    state.success = true
     state_repr = "[]"
     for step in 1:max_steps
         options = get_all_options(state)
-        println(options)
         if length(options) == 0
-            success = length(state.trees) == 1
+            state.success &= length(state.trees) == 1
             break 
         end
-        option_idx = sample(options) # select an option
+        option_idx, prob = sample(options, temp) # select an option
+        logq += log(prob)
         option = options[option_idx]
-        result = sample(option.prod) # sample a result from the option
-        println(option, "->", option.prod, "->", result)
+        result, prob = sample(option.prod) # sample a result from the option
+        logq += log(prob)
         run_option!(option, result, state, net)
-        print("step $step: ")
-        state_repr_ = repr(state.trees)
-        # println("repr:", state_repr)
-        println_diff(state_repr_, state_repr)
-        state_repr = state_repr_
-    end
-    if !success prob = 0.0 end
-    return state, prob
-end
-
-function learn_step!(net::Net, node::Tree, prob::Float64)
-    idx = (Int(node.edge), node.node, node.left, node.right, 
-           node.input, node.output)
-    if idx isa NTuple{6, Int}
-        add!(net, idx, prob)
-    end
-end
-
-function learn!(net::Net, state::State, prob::Float64, decay::Float64=1.0)
-    # traverse the tree and update net by prob
-    for tree in state.trees
-        traverse(node -> learn_step!(net, node, prob), tree)
-    end
-    if decay < 1.0
-        for array in values(net.data)
-            array .*= decay
+        if DEBUG
+            println("Step $step: ")
+            # println("Options: ", options)
+            println("Selected: ", option, "->", option.prod, "->", result)
+            state_repr_ = repr(state.trees)
+            println_diff(state_repr_, state_repr)
+            state_repr = state_repr_
         end
     end
-    # return net
+    state.success &= length(get_all_options(state)) == 0
+    logp = state.success ? eval_logp(state.trees[1], net, true) : -Inf 
+    return state, logp, logq
 end
 
-function main()
+# return all rules as 6-tuples from a state
+function extract_rules(state::State)
+    push_rule! = rules -> node -> begin
+        edge = (node.edge isa Etype) ? Int(node.edge) : 0
+        left = (node.left isa Tree) ? node.left.node : 0
+        right = (node.right isa Tree) ? node.right.node : 0
+        input = (node.input isa Int) ? node.input : 0
+        output = (node.output isa Int) ? node.output : 0
+        rule = (edge, node.node, left, right, input, output)
+        push!(rules, rule)
+    end
+    # only care about the first tree
+    tree = state.trees[1]
+    rules = []
+    traverse(push_rule!(rules), tree)
+    return rules
+end
+
+function learn!(net::Net, results, decay::Float64=1.0)
+    # collect rules and weights from parse trees
+    updates = nothing
+    total_weight = 0.0
+    # reduce numerical error
+    bias = max([logp - logq for (_, logp, logq) in results]...)
+    for (state, logp, logq) in results
+        weight = exp(logp - logq - bias)
+        for rule in extract_rules(state)
+            if updates===nothing
+                updates = Dict(rule => 0.0)
+            elseif !haskey(updates, rule)
+                updates[rule] = 0.0
+            end
+            updates[rule] += weight
+        end
+        total_weight += weight
+    end
+    if total_weight > 0
+        for item in updates
+            if item.second > 0
+                add!(net, item.first, item.second / total_weight)
+            end
+        end
+        if decay < 1.0
+            for array in values(net.data)
+                array .*= decay
+            end
+        end
+    end
+end
+
+function main(seed::Int=1, max_step::Int=10, temp::Number=10)
+    Random.seed!(seed)
     net = bmm_net_init()
     bmm_dataset = ["01T"]
     # bmm_dataset = ["00", "01", "10", "11"]
     datasampler(dataset) = rand(dataset)
-    num_data = 1
-    for i in 1:num_data
-        data = datasampler(bmm_dataset)
-        state, prob = parse(net, data, 10)
-        println(data,':', prob)
-        if prob > 0
-            learn!(net, state, prob)
-        end
+    if DEBUG
+        num_data, num_repeat = 1, 1
+    else
+        num_data, num_repeat = 1000, 1
     end
+    for i in 1:num_data
+        results = []
+        for j in 1:num_repeat
+            data = datasampler(bmm_dataset)
+            DEBUG && println("-----------", i, '-', j, "-----------")
+            state, logp, logq = parse(net, data, max_step, temp)
+            DEBUG && println("Result: ", data, ": ", logp, ", ", logq)
+            push!(results, (state, logp, logq))
+        end
+        learn!(net, results)
+    end
+    println("Learned net: ", net)
 end
-main()
+main(4, 25, 10)

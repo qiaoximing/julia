@@ -91,6 +91,8 @@ function add!(net::Net{Float64}, idx_raw, x)
     end
 end
 
+# TODO: (Optimization)
+# we can directly return the sum and avoid extra computation
 function getval(net::Net{Float64}, targ, cond=[])
     # get raw counts from net
     ndim = length(net.size)
