@@ -184,6 +184,14 @@ function get_all_options(state::State, bias::Number)::Vector{Option}
     allexpans = vcat(state.expans...)
     options = Vector{Option}()
     for dgroup in allexpans
+        # skip top-down expansions when I/O are both sampled
+        # merging to these points are still allowed
+        # if dgroup.prod.targ in (Left, Right)
+        #     node = dgroup.prod.node
+        #     if node.input isa Int && node.output isa Int
+        #         continue
+        #     end
+        # end
         safepush!(options, Option([dgroup], bias))
     end
     # merge two trees

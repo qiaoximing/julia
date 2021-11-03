@@ -1,6 +1,7 @@
 const DEBUG = false
 using Printf
 using Random
+using Folds
 include("net.jl")
 include("tree.jl")
 include("utility.jl")
@@ -419,37 +420,46 @@ function learn!(net::Net, results, decay::Float64=1.0)
     end
 end
 
-function main(seed::Int, max_step::Int, temp::Number, bias::Number)
+function bp_main(seed::Int, max_step::Int, temp::Number, bias::Number)
     # Random.seed!(seed)
     net = bp_net_init()
     if DEBUG
         bp_dataset = (["00T"], [1])
-        # println("Before training: ")
-        # for data in bp_dataset[1]
-        #     state, logp, logq = parse(net, data, max_step, temp, bias)
-        #     println("Result: ", data, ": ", logp, ", ", logq, ", ", state)
-        # end
         num_data, num_repeat = 1, 1
+        # sequential parsing
+        for i in 1:num_data
+            data = datasampler(bp_dataset)
+            results = []
+            for j in 1:num_repeat
+                state, logp, logq = parse(net, data, max_step, temp, bias)
+                println("-----------", i, '-', j, "-----------")
+                println("Result: ", data, ": ", logp, ", ", logq)
+                push!(results, (state, logp, logq))
+            end
+            learn!(net, results, 1.)
+        end
     else
         bp_dataset = (
             ["000T", "001T", "110T", "111T"],
             [9, 1, 1, 9])
-        num_data, num_repeat = 100, 5
-    end
-    for i in 1:num_data
-        data = datasampler(bp_dataset)
-        results = []
-        for j in 1:num_repeat
-            state, logp, logq = parse(net, data, max_step, temp, bias)
-            if DEBUG
-                println("-----------", i, '-', j, "-----------")
-                println("Result: ", data, ": ", logp, ", ", logq)
-            end
-            push!(results, (state, logp, logq))
-            i % 10 == 0 && println(logp, ' ', logq)
+        num_data, num_repeat = 100, 32
+        # multi-thread parsing with Folds.jl
+        println("Number of threads: ", Threads.nthreads())
+        for i in 1:num_data
+            data = datasampler(bp_dataset)
+            results = Folds.collect(parse(net, data, max_step, temp, bias)
+                                    for j in 1:num_repeat)
+            learn!(net, results, 1.)
         end
-        i % 10 == 0 && println()
-        learn!(net, results, 1.)
+        # multi-core parsing (draft)
+        # for i in 1:num_data
+        #     data = datasampler(bp_dataset)
+        #     results = []
+        #     fmap = _ -> parse(net, data, max_step, temp, bias)
+        #     freduce = (results, result) -> [results; result]
+        #     results = pmapreduce(fmap, freduce, 1:num_repeat)
+        #     learn!(net, results, 1.)
+        # end
     end
     println("After training: ")
     for data in bp_dataset[1]
@@ -467,10 +477,76 @@ function main(seed::Int, max_step::Int, temp::Number, bias::Number)
             println("Result: ", data, ": fail.")
         end
     end
-    println("Learned net: ", net)
+    println("Root: ")
     println(getval(net, Output, [(Node, 1)]))
+    println("State: ")
     println(getval(net, Output, [(Node, 7)]))
+    println("Emission: ")
     println(getval(net, Output, [(Node, 11), (Input, 13)]))
     println(getval(net, Output, [(Node, 11), (Input, 14)]))
 end
-main(1, 35, 5, 5)
+
+function hmm_main(seed::Int, max_step::Int, temp::Number, bias::Number)
+    # Random.seed!(seed)
+    net = hmm_net_init()
+    if DEBUG
+        hmm_dataset = (["0101T"], [1])
+        num_data, num_repeat = 1, 1
+    else
+        hmm_dataset = (
+            ["010101T", "101010T", "000000T", "111111T"],
+            [9, 9, 0, 0])
+        num_data, num_repeat = 200, 16
+    end
+    for i in 1:num_data
+        data = datasampler(hmm_dataset)
+        results = Folds.collect(parse(net, data, max_step, temp, bias)
+                                for j in 1:num_repeat)
+        learn!(net, results, 1.)
+    end
+    # for i in 1:num_data
+    #     data = datasampler(hmm_dataset)
+    #     results = []
+    #     for j in 1:num_repeat
+    #         state, logp, logq = parse(net, data, max_step, temp, bias)
+    #         if DEBUG
+    #             println("-----------", i, '-', j, "-----------")
+    #             println("Result: ", data, ": ", logp, ", ", logq)
+    #         end
+    #         push!(results, (state, logp, logq))
+    #         i % 10 == 0 && println(logp, ' ', logq)
+    #     end
+    #     i % 10 == 0 && println()
+    #     learn!(net, results, 1.)
+    # end
+    if DEBUG return end
+    println("After training: ")
+    for data in hmm_dataset[1]
+        success = false
+        cnt = 0
+        while !success && cnt < 10
+            state, logp, logq = parse(net, data, max_step, temp, bias)
+            cnt += 1
+            if state.success
+                success = true
+                println("Result: ", data, ": ", logp, ", ", logq, "\n", state)
+            end
+        end
+        if !success
+            println("Result: ", data, ": fail.")
+        end
+    end
+    # println("Learned net: ", net)
+    println("Root: ")
+    println(round.(getval(net, Output, [(Node, 1)])))
+    println("State: ")
+    println(round.(getval(net, Output, [(Node, 7)])))
+    println("Emission: ")
+    println(round.(getval(net, Output, [(Node, 12), (Input, 15)])))
+    println(round.(getval(net, Output, [(Node, 12), (Input, 16)])))
+    println("Transition: ")
+    println(round.(getval(net, Output, [(Node, 14), (Input, 15)])))
+    println(round.(getval(net, Output, [(Node, 14), (Input, 16)])))
+end
+# @time bp_main(1, 35, 5, 5)
+hmm_main(1, 100, 5, 5)

@@ -115,11 +115,11 @@ function getval(net::Net{Float64}, targ, cond=[])
     return vals
 end
 
-# Bernoulli mixture model with shared emission 
+# Bernoulli process model
 function bp_net_init()
-    n_nodes = 15
+    n_nodes = 14
     net = net_init(n_nodes, "01T") # inputs always terminate with 'T'
-    # Etype: L D
+    # Etype: B D
     # Axes: Edge Node Left Right Input Output
     r, i, p = net.root, net.init, net.printer
     p0, p1, pt = net.alphabet['0'], net.alphabet['1'], net.alphabet['T']
@@ -143,6 +143,59 @@ function bp_net_init()
 
     add!(net, (0, s, 0, 0, i, s0), x) 
     add!(net, (0, s, 0, 0, i, s1), x)
+
+    add!(net, (0, e, 0, 0, s0, p0), y)
+    add!(net, (0, e, 0, 0, s0, p1), x)
+    add!(net, (0, e, 0, 0, s1, p0), x)
+    add!(net, (0, e, 0, 0, s1, p1), y)
+
+    add!(net, (0, g, 0, 0, s0, pt), x)
+    add!(net, (0, g, 0, 0, s1, pt), x)
+
+    add!(net, (0, p0, 0, 0, p0, p0), x)
+    add!(net, (0, p1, 0, 0, p1, p1), x)
+    add!(net, (0, pt, 0, 0, pt, pt), x)
+    return net
+end
+
+# Hidden Markov model
+function hmm_net_init()
+    n_nodes = 16
+    net = net_init(n_nodes, "01T") # inputs always terminate with 'T'
+    # Etype: B D
+    # Axes: Edge Node Left Right Input Output
+    r, i, p = net.root, net.init, net.printer
+    p0, p1, pt = net.alphabet['0'], net.alphabet['1'], net.alphabet['T']
+    s, a, b, c, d, e, g, t, s0, s1 = pt+1:pt+10
+    if s1 > n_nodes warning("need more nodes") end
+    x, y = 5, 10
+    add!(net, (B, r, s, a, i, pt), x) 
+
+    add!(net, (B, a, b, a, s0, pt), x)
+    add!(net, (B, a, b, a, s1, pt), x)
+    add!(net, (B, a, b, c, s0, pt), x)
+    add!(net, (B, a, b, c, s1, pt), x)
+
+    add!(net, (D, b, d, t, s0, s0), x)
+    add!(net, (D, b, d, t, s0, s1), x)
+    add!(net, (D, b, d, t, s1, s0), x)
+    add!(net, (D, b, d, t, s1, s1), x)
+
+    add!(net, (B, d, e, p0, s0, p0), x)
+    add!(net, (B, d, e, p1, s0, p1), x)
+    add!(net, (B, d, e, p0, s1, p0), x)
+    add!(net, (B, d, e, p1, s1, p1), x)
+
+    add!(net, (B, c, g, pt, s0, pt), x)
+    add!(net, (B, c, g, pt, s1, pt), x)
+
+    add!(net, (0, s, 0, 0, i, s0), x) 
+    add!(net, (0, s, 0, 0, i, s1), x)
+
+    add!(net, (0, t, 0, 0, s0, s0), x)
+    add!(net, (0, t, 0, 0, s0, s1), x)
+    add!(net, (0, t, 0, 0, s1, s0), x)
+    add!(net, (0, t, 0, 0, s1, s1), x)
 
     add!(net, (0, e, 0, 0, s0, p0), y)
     add!(net, (0, e, 0, 0, s0, p1), x)
