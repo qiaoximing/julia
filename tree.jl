@@ -44,13 +44,13 @@ function distr_init(node::AbstractTree, targ::Axes, size::Int, lrp::Bool=false)
     return Distr(node, nothing, true, targ, lrp, prob)
 end
 function group_init(x::Distr)
-    prod = Distr(x.node, nothing, true, x.targ, x.lrp, x.prob)
+    prod = Distr(x.node, nothing, true, x.targ, x.lrp, copy(x.prob))
     group = Group{Distr}([x], [true], prod, score(x))
     x.group = group
     return group
 end
 function union!(x::Group{Distr}, y::Group{Distr})
-    append!(x.factors, y.factors) # always disjoint
+    append!(x.factors, y.factors) # factors are always disjoint
     append!(x.enables, y.enables)
     x.prod *= y.prod
     x.score = score(x.prod)
@@ -62,7 +62,7 @@ end
 # disable a Distr and from its Group
 # TODO: optimize with type dispatch
 function disable!(d)
-    if d isa Distr
+    if d isa Distr && d.enable == true
         d.enable = false
         g = d.group
         idx = findfirst(x->x===d, g.factors)
@@ -107,15 +107,15 @@ function tree_init(node::Int, net::Net, type=:normal)
         tree.edge = nothing # no downward expansion
         tree.left = nothing
         tree.right = nothing
+        tree.input = node # constant input
+        push!(tree.conds, (Input, tree.input))
         tree.output = node # constant output
         push!(tree.conds, (Output, tree.output))
-        tree.input = distr_init(tree, Input, n_nodes)
-        add_condition!(tree.input, net, tree.conds)
         tree.lparent = distr_init(tree, Node, n_nodes, false)
         add_condition!(tree.lparent, net, [(Right, node)])
         tree.rparent = distr_init(tree, Node, n_nodes, true)
         add_condition!(tree.rparent, net, [(Left, node)])
-        distrs = (tree.input, tree.lparent, tree.rparent)
+        distrs = (tree.lparent, tree.rparent)
     elseif type == :root
         tree.input = net.init # constant input
         push!(tree.conds, (Input, tree.input))
@@ -166,41 +166,44 @@ mutable struct Option
     prod::Distr # product of products of dgroups
     score::Float64 # score of product
 end
-function Option(dgroups::Vector{Group{Distr}})
+function Option(dgroups::Vector{Group{Distr}}, bias::Number)
     opt_prod = prod([dg.prod for dg in dgroups])
     if sum(opt_prod.prob) == 0
         return nothing
     else
-        opt_score = score(opt_prod)
+        opt_score = score(opt_prod) + bias * (length(dgroups) - 1)
         return Option(dgroups, opt_prod, opt_score)
     end
 end
 
 # evaluate all options and return a Vector{Option}
-function get_all_options(state::State)
-    safepush!(x, i::Nothing) = i
+function get_all_options(state::State, bias::Number)::Vector{Option}
+    safepush!(x, i::Nothing) = x
     safepush!(x, i::Option) = push!(x, i)
     # expansions
     allexpans = vcat(state.expans...)
-    options = [Option([dgroup]) for dgroup in allexpans]
+    options = Vector{Option}()
+    for dgroup in allexpans
+        safepush!(options, Option([dgroup], bias))
+    end
     # merge two trees
     for i in 1:length(state.trees)-1
         # root-root
         root1, root2 = state.rroots[i], state.lroots[i+1]
         if root1!==nothing && root2!==nothing
-            safepush!(options, Option([root1, root2]))
+            safepush!(options, Option([root1, root2], bias))
         end
         # leaf-root
         for leaf in state.rslots[i]
             for root in (state.lroots[i+1], state.rroots[i+1])
                 if root!==nothing
-                    safepush!(options, Option([leaf, root]))
+                    safepush!(options, Option([leaf, root], bias))
         end end end
         # root-leaf
         for root in (state.lroots[i], state.rroots[i])
             if root!==nothing
                 for leaf in state.lslots[i+1]
-                    safepush!(options, Option([root, leaf]))
+                    safepush!(options, Option([root, leaf], bias))
         end end end
     end
     # merge three trees
@@ -209,13 +212,13 @@ function get_all_options(state::State)
         for leaf in state.rslots[i-1]
             root1, root2 = state.rroots[i], state.lroots[i+1]
             if root1!==nothing && root2!==nothing
-                safepush!(options, Option([leaf, root1, root2]))
+                safepush!(options, Option([leaf, root1, root2], bias))
         end end
         # root-root-leaf
         root1, root2 = state.rroots[i-1], state.lroots[i]
         if root1!==nothing && root2!==nothing
             for leaf in state.rslots[i+1]
-                safepush!(options, Option([root1, root2, leaf]))
+                safepush!(options, Option([root1, root2, leaf], bias))
         end end
     end
     return options

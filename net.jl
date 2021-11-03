@@ -28,7 +28,8 @@ struct Net{T,N}
     i2b::Dict{Int,NTuple{N,Int}} # input to binary
     root::Int # root node
     init::Int # input of root
-    prints::Dict{Char,Int} # alphabet of observations
+    printer::Int # a special node to print observations
+    alphabet::Dict{Char,Int} # alphabet of observations
 end
 
 function int_bit_converter(ndim::Int)
@@ -42,7 +43,7 @@ function int_bit_converter(ndim::Int)
     return Dict(b2i), Dict(i2b)
 end
 
-function net_init(n_nodes::Int, alphabet::String, n_edgetypes::Int=2)
+function net_init(n_nodes::Int, alphabet_::String, n_edgetypes::Int=2)
     size = (n_edgetypes, n_nodes, n_nodes, n_nodes, n_nodes, n_nodes)
     ndim = length(size)
     b2i, i2b = int_bit_converter(ndim)
@@ -54,13 +55,13 @@ function net_init(n_nodes::Int, alphabet::String, n_edgetypes::Int=2)
         push!(dict, (b, array))
     end
     # annotate special nodes
-    n = 2
-    root, init = 1:n
-    prints = Dict([(alphabet[i], n+i) for i in 1:length(alphabet)])
-    if n + length(alphabet) > n_nodes
+    n = 3
+    root, init, printer = 1:n
+    alphabet = Dict([(alphabet_[i], n+i) for i in 1:length(alphabet_)])
+    if n + length(alphabet_) > n_nodes
         warning("not enough nodes")
     end
-    net = Net{Float64,eval(ndim)}(Dict(dict), size, b2i, i2b, root, init, prints)
+    net = Net{Float64,eval(ndim)}(Dict(dict), size, b2i, i2b, root, init, printer, alphabet)
     return net
 end
 
@@ -115,33 +116,50 @@ function getval(net::Net{Float64}, targ, cond=[])
 end
 
 # Bernoulli mixture model with shared emission 
-function bmm_net_init()
-    n_nodes = 10
+function bp_net_init()
+    n_nodes = 15
     net = net_init(n_nodes, "01T") # inputs always terminate with 'T'
     # Etype: L D
     # Axes: Edge Node Left Right Input Output
-    R, I = net.root, net.init
-    p0, p1, T = '0', '1', 'T'
-    A = net.prints['T'] + 1
-    S, s0, s1 = A+1:A+3
+    r, i, p = net.root, net.init, net.printer
+    p0, p1, pt = net.alphabet['0'], net.alphabet['1'], net.alphabet['T']
+    s, a, b, c, e, g, s0, s1 = pt+1:pt+8 
     if s1 > n_nodes warning("need more nodes") end
-    println("Net config: 1=R 2=I 3=p0 4=p1 5=T $A=A $S=S $s0=s0 $s1=s1")
-    add!(net, (B, R, S, A, I, T), 100) 
-    add!(net, (D, A, p0, A, s0, T), 45)
-    add!(net, (D, A, p0, A, s1, T), 5)
-    add!(net, (D, A, p1, A, s0, T), 5)
-    add!(net, (D, A, p1, A, s1, T), 45)
-    add!(net, (D, A, p0, T, s0, T), 45)
-    add!(net, (D, A, p0, T, s1, T), 5)
-    add!(net, (D, A, p1, T, s0, T), 5)
-    add!(net, (D, A, p1, T, s1, T), 45)
-    add!(net, (0, S, 0, 0, I, s0), 50) 
-    add!(net, (0, S, 0, 0, I, s1), 50)
-    add!(net, (0, p0, 0, 0, s0, p0), 90)
-    add!(net, (0, p0, 0, 0, s1, p0), 10)
-    add!(net, (0, p1, 0, 0, s0, p1), 10)
-    add!(net, (0, p1, 0, 0, s1, p1), 90)
-    add!(net, (0, T, 0, 0, s0, T), 50)
-    add!(net, (0, T, 0, 0, s1, T), 50)
+    x, y = 10, 10
+    add!(net, (B, r, s, a, i, pt), x) 
+
+    add!(net, (D, a, b, a, s0, pt), x)
+    add!(net, (D, a, b, a, s1, pt), x)
+    add!(net, (D, a, b, c, s0, pt), x)
+    add!(net, (D, a, b, c, s1, pt), x)
+
+    add!(net, (B, b, e, p0, s0, p0), x)
+    add!(net, (B, b, e, p1, s0, p1), x)
+    add!(net, (B, b, e, p0, s1, p0), x)
+    add!(net, (B, b, e, p1, s1, p1), x)
+
+    add!(net, (B, c, g, pt, s0, pt), x)
+    add!(net, (B, c, g, pt, s1, pt), x)
+
+    add!(net, (0, s, 0, 0, i, s0), x) 
+    add!(net, (0, s, 0, 0, i, s1), x)
+
+    add!(net, (0, e, 0, 0, s0, p0), y)
+    add!(net, (0, e, 0, 0, s0, p1), x)
+    add!(net, (0, e, 0, 0, s1, p0), x)
+    add!(net, (0, e, 0, 0, s1, p1), y)
+
+    add!(net, (0, g, 0, 0, s0, pt), x)
+    add!(net, (0, g, 0, 0, s1, pt), x)
+
+    add!(net, (0, p0, 0, 0, p0, p0), x)
+    add!(net, (0, p1, 0, 0, p1, p1), x)
+    add!(net, (0, pt, 0, 0, pt, pt), x)
     return net
+end
+
+function datasampler(dataset)
+    data, prob = dataset
+    i, _ = sample(normalize(prob))
+    return data[i]
 end

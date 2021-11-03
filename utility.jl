@@ -61,7 +61,7 @@ Base.show(io::IO, x::Group) = print(io, x.prod.node.node, "->",
 
 Base.show(io::IO, x::Distr) = print(io, x.prob)
 
-Base.show(io::IO, x::State) = print(io, x.trees, '\n', x.expans)
+Base.show(io::IO, x::State) = print(io, x.trees)
 
 function Base.show(io::IO, x::Tree)
     print(io, "T", x.node, "->")

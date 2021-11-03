@@ -1,4 +1,4 @@
-const DEBUG = true
+const DEBUG = false
 using Printf
 using Random
 include("net.jl")
@@ -20,8 +20,8 @@ function state_init(net::Net)
     return State(trees, expans, lroots, rroots, lslots, rslots, true)
 end
 
-function shift!(state::State, net::Net, item)
-    tree, distrs = tree_init(net.prints[item], net, :leaf)
+function shift!(state::State, net::Net, item::Char)
+    tree, distrs = tree_init(net.alphabet[item], net, :leaf)
     # Temporary fix: remove zero distributions
     # Remove this after implementing automatic exploration
     dgroups = [group_init(d) for d in distrs if sum(d.prob)>0]
@@ -142,6 +142,10 @@ end
 # create a new node at idx and return it, update state
 # TODO: optimize by replacing Array with Dict
 function create_node_at!(node::Tree, result::Int, state::State, net::Net)
+    if result in values(net.alphabet)
+        state.success = false
+        return nothing
+    end
     idx = findfirst(x->x===node.root, state.trees)
     tree, distrs = tree_init(result, net, :normal) 
     dgroups = [group_init(d) for d in distrs if sum(d.prob)>0]
@@ -190,19 +194,22 @@ function connect!(node1::Tree, node2::Tree, axis::Axes, state::State, net::Net, 
     deleteat!(state.lroots, t2_idx)
     deleteat!(state.rroots, t2_idx)
     # remove slots and rearrange
-    for slots in (state.lslots, state.rslots)
-        slots1, slots2 = slots[t1_idx], slots[t2_idx]
-        slot_idx = findfirst(x->(x.prod.node===node1 && x.prod.targ==axis), slots1)
-        if slot_idx!==nothing
-            # println("Before:", slots1)
+    ls, rs = state.lslots, state.rslots
+    ls1, ls2, rs1, rs2 = ls[t1_idx], ls[t2_idx], rs[t1_idx], rs[t2_idx]
+    ls1_idx = findfirst(x->(x.prod.node===node1 && x.prod.targ==axis), ls1)
+    rs1_idx = findfirst(x->(x.prod.node===node1 && x.prod.targ==axis), rs1)
+    if ls1_idx!==nothing
             if observed == false # replace the used slot with slots2
-                slots[t1_idx] = [slots1[1:slot_idx-1]; slots2; slots1[slot_idx+1:end]]
-            elseif axis == Left # lslots1 to the left then lslots2
-                slots[t1_idx] = [slots1[1:slot_idx-1]; slots2]
-            elseif axis == Right # rslots2 then rslots1 to the right
-                slots[t1_idx] = [slots2; slots1[slot_idx+1:end]]
+            ls[t1_idx] = [ls1[1:ls1_idx-1]; ls2; ls1[ls1_idx+1:end]]
+        else # the left of lslots1, then lslots2
+            ls[t1_idx] = [ls1[1:ls1_idx-1]; ls2]
             end
-            # println("After:", slots1)
+    end
+    if rs1_idx!==nothing
+        if observed == false # replace the used slot with slots2
+            rs[t1_idx] = [rs1[1:rs1_idx-1]; rs2; rs1[rs1_idx+1:end]]
+        else # rslots2, then the right of rslots1 
+            rs[t1_idx] = [rs2; rs1[rs1_idx+1:end]]
         end
     end
     deleteat!(state.lslots, t2_idx)
@@ -226,6 +233,7 @@ function run_option!(option::Option, result::Int, state::State, net::Net)
         else
             # create new node and add it to state
             new_node = create_node_at!(node, result, state, net)
+            if new_node===nothing return end
             if targ in (Left, Right)
                 # merge new node to node. Note the new node is unobserved
                 connect!(node, new_node, targ, state, net, false)
@@ -239,6 +247,7 @@ function run_option!(option::Option, result::Int, state::State, net::Net)
         node1, targ1 = dg1.prod.node, dg1.prod.targ
         node2, targ2 = dg2.prod.node, dg2.prod.targ
         new_node = create_node_at!(node1, result, state, net)
+        if new_node===nothing return end
         if targ1 == Node && targ2 == Node
             connect!(new_node, node1, Left, state, net)
             connect!(new_node, node2, Right, state, net)
@@ -257,6 +266,7 @@ function run_option!(option::Option, result::Int, state::State, net::Net)
         node2, targ2 = dg2.prod.node, dg2.prod.targ
         node3, targ3 = dg3.prod.node, dg3.prod.targ
         new_node = create_node_at!(node1, result, state, net)
+        if new_node===nothing return end
         if targ1 in (Left, Right) && targ2 == Node && targ3 == Node
             connect!(new_node, node2, Left, state, net)
             connect!(new_node, node3, Right, state, net)
@@ -315,7 +325,8 @@ function eval_logp(node::Tree, net::Net, leftmost::Bool)
     return logp_left + logp_right + logp_node
 end
 
-function parse(net::Net, data::String, max_steps::Int, temp::Number)
+function parse(net::Net, data::String, max_steps::Int, 
+               temp::Number, bias::Number)
     state = state_init(net)
     logq = 0.0 # proposal probability
     # first shift in all data
@@ -326,27 +337,32 @@ function parse(net::Net, data::String, max_steps::Int, temp::Number)
     state.success = true
     state_repr = "[]"
     for step in 1:max_steps
-        options = get_all_options(state)
+        options = get_all_options(state, bias)
         if length(options) == 0
             state.success &= length(state.trees) == 1
             break 
         end
         option_idx, prob = sample(options, temp) # select an option
-        logq += log(prob)
+        # logq += log(prob)
         option = options[option_idx]
         result, prob = sample(option.prod) # sample a result from the option
         logq += log(prob)
-        run_option!(option, result, state, net)
         if DEBUG
             println("Step $step: ")
-            # println("Options: ", options)
-            println("Selected: ", option, "->", option.prod, "->", result)
+            # println("Slots: ", state.rslots[1])
+            println("Options: ", options)
+            product = option.dgroups[1].prod
+            println("Selected: ", option, "->", product, "->", result)
+        end
+        run_option!(option, result, state, net)
+        if DEBUG
             state_repr_ = repr(state.trees)
             println_diff(state_repr_, state_repr)
             state_repr = state_repr_
         end
+        if !state.success break end
     end
-    state.success &= length(get_all_options(state)) == 0
+    state.success &= length(get_all_options(state, bias)) == 0
     logp = state.success ? eval_logp(state.trees[1], net, true) : -Inf 
     return state, logp, logq
 end
@@ -395,34 +411,66 @@ function learn!(net::Net, results, decay::Float64=1.0)
         end
         if decay < 1.0
             for array in values(net.data)
-                array .*= decay
+                for i in keys(array.data)
+                    array.data[i] *= decay
+                end
             end
         end
     end
 end
 
-function main(seed::Int=1, max_step::Int=10, temp::Number=10)
-    Random.seed!(seed)
-    net = bmm_net_init()
-    bmm_dataset = ["01T"]
-    # bmm_dataset = ["00", "01", "10", "11"]
-    datasampler(dataset) = rand(dataset)
+function main(seed::Int, max_step::Int, temp::Number, bias::Number)
+    # Random.seed!(seed)
+    net = bp_net_init()
     if DEBUG
+        bp_dataset = (["00T"], [1])
+        # println("Before training: ")
+        # for data in bp_dataset[1]
+        #     state, logp, logq = parse(net, data, max_step, temp, bias)
+        #     println("Result: ", data, ": ", logp, ", ", logq, ", ", state)
+        # end
         num_data, num_repeat = 1, 1
     else
-        num_data, num_repeat = 1000, 1
+        bp_dataset = (
+            ["000T", "001T", "110T", "111T"],
+            [9, 1, 1, 9])
+        num_data, num_repeat = 100, 5
     end
     for i in 1:num_data
+        data = datasampler(bp_dataset)
         results = []
         for j in 1:num_repeat
-            data = datasampler(bmm_dataset)
-            DEBUG && println("-----------", i, '-', j, "-----------")
-            state, logp, logq = parse(net, data, max_step, temp)
-            DEBUG && println("Result: ", data, ": ", logp, ", ", logq)
+            state, logp, logq = parse(net, data, max_step, temp, bias)
+            if DEBUG
+                println("-----------", i, '-', j, "-----------")
+                println("Result: ", data, ": ", logp, ", ", logq)
+            end
             push!(results, (state, logp, logq))
+            i % 10 == 0 && println(logp, ' ', logq)
         end
-        learn!(net, results)
+        i % 10 == 0 && println()
+        learn!(net, results, 1.)
+    end
+    println("After training: ")
+    for data in bp_dataset[1]
+        success = false
+        cnt = 0
+        while !success && cnt < 10
+            state, logp, logq = parse(net, data, max_step, temp, bias)
+            cnt += 1
+            if state.success
+                success = true
+                println("Result: ", data, ": ", logp, ", ", logq, ", ", state)
+            end
+        end
+        if !success
+            println("Result: ", data, ": fail.")
+        end
     end
     println("Learned net: ", net)
+    println(getval(net, Output, [(Node, 1)]))
+    println(getval(net, Output, [(Node, 7)]))
+    println(getval(net, Output, [(Node, 11), (Input, 13)]))
+    println(getval(net, Output, [(Node, 11), (Input, 14)]))
 end
-main(4, 25, 10)
+main(1, 35, 5, 5)
