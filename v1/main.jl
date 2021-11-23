@@ -1,4 +1,5 @@
-const DEBUG = false
+const DEBUG = true
+const IInf = typemax(Int64) # Int Inf
 using Printf
 using Random
 using Folds
@@ -344,17 +345,28 @@ function parse(net::Net, data::String, max_steps::Int,
             break 
         end
         option_idx, prob = sample(options, temp) # select an option
+        if option_idx == IInf
+            warning("Unbounded option distriubtion")
+            continue
+        end
         # logq += log(prob)
         option = options[option_idx]
         result, prob = sample(option.prod) # sample a result from the option
-        logq += log(prob)
         if DEBUG
             println("Step $step: ")
             # println("Slots: ", state.rslots[1])
             println("Options: ", options)
-            product = option.dgroups[1].prod
+            product = option.prod
             println("Selected: ", option, "->", product, "->", result)
+            for i in 1:length(option.dgroups)
+                println("DGroup $(i): ", option.dgroups[i].prod)
+            end
         end
+        if result == IInf
+            state.success = false
+            break
+        end
+        logq += log(prob)
         run_option!(option, result, state, net)
         if DEBUG
             state_repr_ = repr(state.trees)
@@ -442,7 +454,7 @@ function bp_main(seed::Int, max_step::Int, temp::Number, bias::Number)
         bp_dataset = (
             ["000T", "001T", "110T", "111T"],
             [9, 1, 1, 9])
-        num_data, num_repeat = 100, 32
+        num_data, num_repeat = 100, 16
         # multi-thread parsing with Folds.jl
         println("Number of threads: ", Threads.nthreads())
         for i in 1:num_data
@@ -460,30 +472,30 @@ function bp_main(seed::Int, max_step::Int, temp::Number, bias::Number)
         #     results = pmapreduce(fmap, freduce, 1:num_repeat)
         #     learn!(net, results, 1.)
         # end
-    end
-    println("After training: ")
-    for data in bp_dataset[1]
-        success = false
-        cnt = 0
-        while !success && cnt < 10
-            state, logp, logq = parse(net, data, max_step, temp, bias)
-            cnt += 1
-            if state.success
-                success = true
-                println("Result: ", data, ": ", logp, ", ", logq, ", ", state)
+        println("After training: ")
+        for data in bp_dataset[1]
+            success = false
+            cnt = 0
+            while !success && cnt < 10
+                state, logp, logq = parse(net, data, max_step, temp, bias)
+                cnt += 1
+                if state.success
+                    success = true
+                    println("Result: ", data, ": ", logp, ", ", logq, ", ", state)
+                end
+            end
+            if !success
+                println("Result: ", data, ": fail.")
             end
         end
-        if !success
-            println("Result: ", data, ": fail.")
-        end
+        println("Root: ")
+        println(getval(net, Output, [(Node, 1)]))
+        println("State: ")
+        println(getval(net, Output, [(Node, 7)]))
+        println("Emission: ")
+        println(getval(net, Output, [(Node, 11), (Input, 13)]))
+        println(getval(net, Output, [(Node, 11), (Input, 14)]))
     end
-    println("Root: ")
-    println(getval(net, Output, [(Node, 1)]))
-    println("State: ")
-    println(getval(net, Output, [(Node, 7)]))
-    println("Emission: ")
-    println(getval(net, Output, [(Node, 11), (Input, 13)]))
-    println(getval(net, Output, [(Node, 11), (Input, 14)]))
 end
 
 function hmm_main(seed::Int, max_step::Int, temp::Number, bias::Number)
@@ -548,5 +560,5 @@ function hmm_main(seed::Int, max_step::Int, temp::Number, bias::Number)
     println(round.(getval(net, Output, [(Node, 14), (Input, 15)])))
     println(round.(getval(net, Output, [(Node, 14), (Input, 16)])))
 end
-# @time bp_main(1, 35, 5, 5)
-hmm_main(1, 100, 5, 5)
+bp_main(1, 35, 5, 5)
+# hmm_main(1, 100, 5, 5)

@@ -30,6 +30,8 @@ struct Net{T,N}
     init::Int # input of root
     printer::Int # a special node to print observations
     alphabet::Dict{Char,Int} # alphabet of observations
+    alpha::Float64 # hyperparameter for smoothing
+    beta::Float64 # hyperparameter for exploring
 end
 
 function int_bit_converter(ndim::Int)
@@ -43,7 +45,8 @@ function int_bit_converter(ndim::Int)
     return Dict(b2i), Dict(i2b)
 end
 
-function net_init(n_nodes::Int, alphabet_::String, n_edgetypes::Int=2)
+function net_init(n_nodes::Int, alphabet_::String, n_edgetypes::Int, 
+                  alpha::Float64, beta::Float64)
     size = (n_edgetypes, n_nodes, n_nodes, n_nodes, n_nodes, n_nodes)
     ndim = length(size)
     b2i, i2b = int_bit_converter(ndim)
@@ -61,7 +64,8 @@ function net_init(n_nodes::Int, alphabet_::String, n_edgetypes::Int=2)
     if n + length(alphabet_) > n_nodes
         warning("not enough nodes")
     end
-    net = Net{Float64,eval(ndim)}(Dict(dict), size, b2i, i2b, root, init, printer, alphabet)
+    net = Net{Float64,eval(ndim)}(Dict(dict), size, b2i, i2b, root, 
+                                  init, printer, alphabet, alpha, beta)
     return net
 end
 
@@ -118,7 +122,7 @@ end
 # Bernoulli process model
 function bp_net_init()
     n_nodes = 14
-    net = net_init(n_nodes, "01T") # inputs always terminate with 'T'
+    net = net_init(n_nodes, "01T", 2, 1e-5 , 1.) # inputs always terminate with 'T'
     # Etype: B D
     # Axes: Edge Node Left Right Input Output
     r, i, p = net.root, net.init, net.printer
@@ -161,7 +165,7 @@ end
 # Hidden Markov model
 function hmm_net_init()
     n_nodes = 16
-    net = net_init(n_nodes, "01T") # inputs always terminate with 'T'
+    net = net_init(n_nodes, "01T", 2, 0.0, 0.0) # inputs always terminate with 'T'
     # Etype: B D
     # Axes: Edge Node Left Right Input Output
     r, i, p = net.root, net.init, net.printer

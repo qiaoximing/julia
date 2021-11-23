@@ -17,10 +17,19 @@ function deletefirst!(f::Function, x)
 end
 
 function deleteall!(f::Function, x)
-    idxs = findall(f, x)
-    for i in idxs
-        deleteat!(x, i)
+    # idxs = findall(f, x)
+    # for i in idxs
+    #     deleteat!(x, i)
+    # end
+    filter!(i->f(i)==false, x)
+end
+
+function powerset(x::Vector{T}) where T
+    result = Vector{T}[[]]
+    for elem in x, j in eachindex(result)
+        push!(result, [result[j] ; elem])
     end
+    result
 end
 
 function warning(msg::String)

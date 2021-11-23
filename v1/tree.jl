@@ -22,9 +22,24 @@ end
 
 safediv(x::T, y::T) where T <: Number = y != 0 ? x / y : zero(T)
 normalize(x) = safediv.(x, sum(x))
-Base.:(*)(x::Distr, y::Distr) = Distr(x.node, x.group, x.enable, x.targ, x.lrp, normalize(x.prob .* y.prob))
-Base.:(/)(x::Distr, y::Distr) = Distr(x.node, x.group, x.enable, x.targ, x.lrp, normalize(safediv.(x.prob, y.prob)))
-score(x::Distr) = begin p = filter(t->t>0, x.prob); return sum(p .* log.(p)) end
+function Base.:(*)(x::Distr, y::Distr)
+    residual = (1 - sum(x.prob)) * (1 - sum(y.prob))
+    product = x.prob .* y.prob
+    prob = product ./ (sum(product) + residual)
+    return Distr(x.node, x.group, x.enable, x.targ, x.lrp, prob)
+end
+function Base.:(/)(x::Distr, y::Distr)
+    # warning: a*b/b = normalize(a) if sum(b.prob)=1. The information is lost
+    residual = safediv(1 - sum(x.prob), 1 - sum(y.prob))
+    quotient = safediv.(x.prob, y.prob)
+    prob = quotient ./ (sum(quotient) + residual)
+    return Distr(x.node, x.group, x.enable, x.targ, x.lrp, prob)
+end
+function score(x::Distr)
+    # ignore the unnormalized part
+    p = filter(t->t>0, x.prob)
+    return sum(p .* log.(p))
+end
 # Optimize: for a fixed distribution, use binary search to speed up
 function sample(x::Vector{Float64})
     r = rand() # random float in [0, 1)
@@ -33,8 +48,11 @@ function sample(x::Vector{Float64})
         i += 1
         r -= x[i]
     end
-    # note: concentrate to length(x) if sum(x) < 1
-    return i, x[i]
+    if r < 0
+        return i, x[i]
+    else
+        return IInf, 1 - sum(x)
+    end
 end
 sample(x::Distr) = sample(x.prob)
 
@@ -90,8 +108,22 @@ mutable struct Tree <: AbstractTree
 end
 
 function add_condition!(d::Distr, net::Net, conds)
-    vals = getval(net, d.targ, conds)
-    d.prob = safediv.(vals, sum(vals))
+    if net.alpha == 0
+        vals = getval(net, d.targ, conds)
+    else
+        vals = zeros(Float64, net.size[Int(d.targ)])
+        for sub_conds in powerset(conds)
+            weight = net.alpha ^ (length(conds) - length(sub_conds))
+            sub_vals = getval(net, d.targ, sub_conds)
+            # sub_vals = getval(net, d.targ, conds)
+            vals .+= sub_vals .* weight
+        end
+    end
+    if d.targ != Edge
+        d.prob = safediv.(vals, sum(vals) + net.beta)
+    else
+        d.prob = safediv.(vals, sum(vals))
+    end
 end
 
 function tree_init(node::Int, net::Net, type=:normal)
@@ -255,3 +287,6 @@ function leaves(t)
         return [t]
     end
 end
+
+Tree()=Tree(nothing,1,nothing,nothing,1,1,nothing,nothing,nothing,[])
+Distr(prob) = Distr(Tree(), nothing, true, Node, false, prob)
