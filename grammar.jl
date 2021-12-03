@@ -47,7 +47,7 @@ function test_grammar()
     label = compile_label(terminals, nonterminals)
     rules = compile_rules(index, label, [
         "S0 -> S \0 1.0",
-        "S -> A S 0.5 | B 0.5",
+        "S -> A S 0.5 | A B 0.5",
         # "S -> S A 0.5 | A 0.5",
         # "S -> A 1.0",
         "A -> a 0.25 | b 0.25 | c 0.25 | d 0.25",
