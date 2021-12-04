@@ -68,9 +68,9 @@ end
 
 function parse_cyk(str::String, g::Grammar)
     chart = compile_cyk_chart(str, g) 
-    for lhs in 8:g.size
-        println(g.label[lhs][1], ": ", chart[lhs, :, :])
-    end
+    # for lhs in g.index["S"]:g.size
+    #     println(g.label[lhs][1], ": ", chart[lhs, :, :])
+    # end
     if chart !== nothing
         # use S, not S0
         return sample_cyk(g.index["S"], 1, length(str), g, chart)

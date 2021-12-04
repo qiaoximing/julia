@@ -1,3 +1,8 @@
+module MyGrammar
+
+using Utility
+export Grammar, test_grammar, generate_dataset
+
 struct Grammar
     size::Int64
     index::Dict{String, Int64}
@@ -55,4 +60,29 @@ function test_grammar()
         "B -> z 1.0"
     ])
     return Grammar(length(index), index, label, rules)
+end
+
+function expand!(io::IOBuffer, lhs::Int64, g::Grammar)
+    if g.label[lhs][2]
+        write(io, g.label[lhs][1])
+    else
+        weights = map(x->x[2], g.rules[lhs])
+        idx, _ = sample(normalize(weights))
+        rhs, _ = g.rules[lhs][idx]
+        for sym in rhs
+            expand!(io, sym, g)
+        end
+    end
+end
+
+function generate_sentence(g::Grammar)
+    io = IOBuffer()
+    expand!(io, g.index["S"], g)
+    return String(take!(io))
+end
+
+function generate_dataset(g::Grammar, n::Int64)
+    return [generate_sentence(g) for i in 1:n]
+end
+
 end

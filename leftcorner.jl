@@ -13,7 +13,7 @@ struct Heuristic
 end
 
 # Statically compile heuristic from grammar
-function compile_heuristic(g::Grammar)
+function compile_lc_heuristic(g::Grammar)
     s = g.size
     p = zeros(Float64, s, s)
     for lhs in 1:s
