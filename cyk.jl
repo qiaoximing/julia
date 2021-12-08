@@ -13,7 +13,7 @@ function compile_cyk_chart(str::String, g::Grammar)
         for lhs in 1:g.size
             for (rhs, weight) in g.rules[lhs]
                 if length(rhs) == 1 && rhs[1] == g.index[string(str[s])]
-                    chart[lhs, s, s + 1] = weight
+                    chart[lhs, s, s + 1] = weight / g.norms[lhs]
                 end
             end
         end
@@ -27,7 +27,7 @@ function compile_cyk_chart(str::String, g::Grammar)
                             chart[lhs, s, s + l] += (
                                 chart[rhs[1], s, s + t] *
                                 chart[rhs[2], s + t, s + l] *
-                                weight)
+                                weight / g.norms[lhs])
                         end
                     end
                 end
@@ -37,8 +37,18 @@ function compile_cyk_chart(str::String, g::Grammar)
     return chart
 end
 
-function sample_cyk(lhs::Int64, s::Int64, l::Int64, g::Grammar, chart::Array)
+function sample_cyk!(lhs::Int64, s::Int64, l::Int64, str::String, g::Grammar, chart::Array, learn::Bool)
     if l == 1
+        if learn
+            # update weight and norm
+            for (i, (rhs, p)) in enumerate(g.rules[lhs])
+                if length(rhs) == 1 && rhs[1] == g.index[string(str[s])]
+                    g.rules[lhs][i] = (rhs, p + 1.0)
+                    g.norms[lhs] += 1.0
+                    break
+                end
+            end
+        end
         return chart[lhs, s, s + l], 1.
     else
         weights = zeros(l - 1, length(g.rules[lhs]))
@@ -48,19 +58,27 @@ function sample_cyk(lhs::Int64, s::Int64, l::Int64, g::Grammar, chart::Array)
                     weights[t, i] = (
                         chart[rhs[1], s, s + t] *
                         chart[rhs[2], s + t, s + l] *
-                        weight)
+                        weight / g.norms[lhs])
                 else
                     weights[t, i] = 0
                 end
             end
         end
-        distr = reduce(vcat, weights) ./ chart[lhs, s, s + l]
-        idx, q = sample(distr)
+        weights = reduce(vcat, weights)
+        idx, q = sample(normalize(weights))
         t = mod(idx - 1, l - 1) + 1
         rhs, p = g.rules[lhs][div(idx - 1, l - 1) + 1]
-        println("$(g.label[lhs][1]) -> $(s) $(g.label[rhs[1]][1]) $(s+t) $(g.label[rhs[2]][1]) $(s+l) (p=$p, q=$q)")
-        left_p, left_q = sample_cyk(rhs[1], s, t, g, chart)
-        right_p, right_q = sample_cyk(rhs[2], s + t, l - t, g, chart)
+        if learn
+            # update weight and norm
+            g.rules[lhs][div(idx - 1, l - 1) + 1] = (rhs, p + 1.0)
+            g.norms[lhs] += 1.0
+        end
+        p /= g.norms[lhs]
+        if !learn
+            println("$(g.label[lhs][1]) -> $(s) $(g.label[rhs[1]][1]) $(s+t) $(g.label[rhs[2]][1]) $(s+l) (p=$p, q=$q)")
+        end
+        left_p, left_q = sample_cyk!(rhs[1], s, t, str, g, chart, learn)
+        right_p, right_q = sample_cyk!(rhs[2], s + t, l - t, str, g, chart, learn)
         # we should always have p * left_p * right_p == chart[lhs, s, s + l]
         return p * left_p * right_p, q * left_q * right_q
     end
@@ -73,7 +91,16 @@ function parse_cyk(str::String, g::Grammar)
     # end
     if chart !== nothing
         # use S, not S0
-        return sample_cyk(g.index["S"], 1, length(str), g, chart)
+        return sample_cyk!(g.index["S"], 1, length(str), str, g, chart, false)
+    else
+        return 0., 0.
+    end
+end
+
+function parse_cyk!(str::String, g::Grammar)
+    chart = compile_cyk_chart(str, g) 
+    if chart !== nothing
+        return sample_cyk!(g.index["S"], 1, length(str), str, g, chart, true)
     else
         return 0., 0.
     end

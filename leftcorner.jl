@@ -19,7 +19,7 @@ function compile_lc_heuristic(g::Grammar)
     for lhs in 1:s
         for (rhs, weight) in g.rules[lhs]
             lc = rhs[1]
-            p[lc, lhs] += weight
+            p[lc, lhs] += weight / g.norms[lhs]
         end
     end
     r = Matrix{Float64}(I, s, s)

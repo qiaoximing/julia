@@ -1,13 +1,14 @@
 module MyGrammar
 
 using Utility
-export Grammar, test_grammar, generate_dataset
+export Grammar, test_grammar, init_grammar, generate_dataset
 
 struct Grammar
     size::Int64
     index::Dict{String, Int64}
     label::Vector{Tuple{String, Bool}} # 0->nonterminals, 1->terminals 
     rules::Vector{Vector{Tuple{Vector{Int}, Float64}}} # list of rules
+    norms::Vector{Float64} # normalization of rules weights
 end
 
 function compile_index(terminals, nonterminals)
@@ -45,21 +46,50 @@ function compile_rules(index, label, strs)
     return rules
 end
 
+function compile_norm(rules)
+    return [sum([y[2] for y in x]) for x in rules]
+end
+
 function test_grammar()
     terminals = ["a","b","c","d","z","\0"]
     nonterminals = ["S0","S","A","B"]
     index = compile_index(terminals, nonterminals)
     label = compile_label(terminals, nonterminals)
     rules = compile_rules(index, label, [
-        "S0 -> S \0 1.0",
-        "S -> A S 0.5 | A B 0.5",
+        "S0 -> S \0 1",
+        "S -> A S 2 | A B 1",
         # "S -> S A 0.5 | A 0.5",
         # "S -> A 1.0",
-        "A -> a 0.25 | b 0.25 | c 0.25 | d 0.25",
+        "A -> a 1 | b 1 | c 1 | d 1",
         # "A -> a 1.0"
-        "B -> z 1.0"
+        "B -> z 1"
     ])
-    return Grammar(length(index), index, label, rules)
+    norms = compile_norm(rules)
+    return Grammar(length(index), index, label, rules, norms)
+end
+
+function init_grammar()
+    terminals = ["a","b","c","d","z","\0"]
+    nonterminals = ["S0","S","A","B"]
+    index = compile_index(terminals, nonterminals)
+    label = compile_label(terminals, nonterminals)
+    rules = compile_rules(index, label, [
+        "S0 -> S \0 1",
+        "S -> S S 1 | S A 1 | S B 1",
+        "S -> A S 1 | A A 1 | A B 1",
+        "S -> B S 1 | B A 1 | B B 1",
+        "S -> a 1 | b 1 | c 1 | d 1 | z 1",
+        "A -> S S 1 | S A 1 | S B 1",
+        "A -> A S 1 | A A 1 | A B 1",
+        "A -> B S 1 | B A 1 | B B 1",
+        "A -> a 1 | b 1 | c 1 | d 1 | z 1",
+        "B -> S S 1 | S A 1 | S B 1",
+        "B -> A S 1 | A A 1 | A B 1",
+        "B -> B S 1 | B A 1 | B B 1",
+        "B -> a 1 | b 1 | c 1 | d 1 | z 1",
+    ])
+    norms = compile_norm(rules)
+    return Grammar(length(index), index, label, rules, norms)
 end
 
 function expand!(io::IOBuffer, lhs::Int64, g::Grammar)
