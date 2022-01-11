@@ -1,7 +1,8 @@
-module MyGrammar
+module SparseGrammar
 
 using Utility
-export Grammar, test_grammar, init_grammar, generate_dataset
+export Grammar, decay!, update!
+export test_grammar, init_grammar, generate_dataset
 
 struct Grammar
     size::Int64
@@ -50,6 +51,23 @@ function compile_norm(rules)
     return [sum([y[2] for y in x]) for x in rules]
 end
 
+function decay!(g::Grammar, rate::Float64)
+    for r in g.rules
+        for (i, (rhs, weight)) in enumerate(r)
+            r[i] = (rhs, quantize(weight * rate))
+        end
+    end
+    g.norms .= compile_norm(g.rules)
+end
+
+function update!(g::Grammar, update::Vector)
+    for (lhs, i) in update
+        rhs, p = g.rules[lhs][i]
+        g.rules[lhs][i] = (rhs, p + 1.0)
+        g.norms[lhs] += 1.0
+    end
+end
+
 function test_grammar()
     terminals = ["a","b","c","d","z","\0"]
     nonterminals = ["S0","S","A","B"]
@@ -57,9 +75,8 @@ function test_grammar()
     label = compile_label(terminals, nonterminals)
     rules = compile_rules(index, label, [
         "S0 -> S \0 1",
-        "S -> A S 2 | A B 1",
-        # "S -> S A 0.5 | A 0.5",
-        # "S -> A 1.0",
+        "S -> A S 1 | A B 1",
+        # "S -> S A 1 | A A 1",
         "A -> a 1 | b 1 | c 1 | d 1",
         # "A -> a 1.0"
         "B -> z 1"

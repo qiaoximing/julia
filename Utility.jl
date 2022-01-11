@@ -1,7 +1,7 @@
 module Utility
 
 import LinearAlgebra
-export warning, relative_error, normalize, sample
+export warning, relative_error, normalize, quantize, sample
 export I
 
 function warning(msg::String)
@@ -14,6 +14,11 @@ function relative_error(target, estimate)
 end
 
 normalize(x) = x ./ sum(x)
+
+function quantize(x::Float64)
+    a, b = modf(x)
+    return b + (rand() < a ? 1.0 : 0.0)
+end
 
 function sample(x::Vector{Float64})
     r = rand() # random float in [0, 1)
