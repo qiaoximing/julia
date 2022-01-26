@@ -1,7 +1,7 @@
 module Utility
 
 import LinearAlgebra
-export warning, relative_error, normalize, quantize, sample
+export warning, relative_error, div0, normalize, quantize, sample
 export I
 
 function warning(msg::String)
@@ -13,6 +13,8 @@ function relative_error(target, estimate)
     return maximum(abs.(target - estimate)) / maximum(abs.(target))
 end
 
+div0(x::Float64, y::Float64)::Float64 = x == 0. ? 0. : x / y
+
 normalize(x) = x ./ sum(x)
 
 function quantize(x::Float64)
@@ -20,18 +22,15 @@ function quantize(x::Float64)
     return b + (rand() < a ? 1.0 : 0.0)
 end
 
-function sample(x::Vector{Float64})
+function sample(x::Array{Float64})
     r = rand() # random float in [0, 1)
-    i = 0
-    while i < length(x) && r >= 0
-        i += 1
+    for i in eachindex(x)
         r -= x[i]
+        if r < 0
+            return i, x[i]
+        end
     end
-    if r < 0
-        return i, x[i]
-    else
-        return 0, 1 - sum(x)
-    end
+    return 0, 1 - sum(x)
 end
 
 I = LinearAlgebra.I
