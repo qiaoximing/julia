@@ -80,22 +80,22 @@ function decay!(x::Float64, g::Grammar)
     # g.ur[g.ns+1:end, :] .-= (g.ur[g.ns+1:end, :] .- (2 * g.ns / (g.n-g.ns))) .* x
 end
 
-function expand!(io::IOBuffer, lhs::Int64, g::Grammar)
+function simulate!(io::IOBuffer, lhs::Int64, g::Grammar)
     if lhs > g.ns # lhs is a terminal
         write(io, g.label[lhs])
     else
-        rhs1, _ = sample(normalize(g.c.lr[:, lhs] + g.ur[:, lhs]))
-        expand!(io, rhs1, g)
-        rhs2, _ = sample(normalize([g.br[:, rhs1, lhs]; g.ur[rhs1, lhs]]))
-        if rhs2 <= g.n
-            expand!(io, rhs2, g)
+        left, _ = sample(normalize(g.c.lr[:, lhs] + g.ur[:, lhs]))
+        simulate!(io, left, g)
+        right, _ = sample(normalize([g.br[:, left, lhs]; g.ur[left, lhs]]))
+        if right <= g.n
+            simulate!(io, right, g)
         end
     end
 end
 
 function generate_sentence(g::Grammar)
     io = IOBuffer()
-    expand!(io, 1, g)
+    simulate!(io, 1, g)
     return String(take!(io))
 end
 
