@@ -1,8 +1,16 @@
 using DataStructures
+using Random
 
 function warning(msg::String)
     printstyled("WARNING: ", bold=true, color=:yellow)
     println(msg)
+end
+
+function debug(args...)
+    # print(args...)
+end
+function debugln(args...)
+    # println(args...)
 end
 
 function relative_error(target, estimate)

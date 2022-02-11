@@ -25,6 +25,7 @@ mutable struct GrammarEx
     type::Vector{NodeType} # type of nodes
     label::Vector{String} # label of all symbols
     index::Dict{String, Int} # index of all labels
+    alpha::Float32 # hyperparameter for Dirichlet distribution prior
     h::NamedTuple # compiled heuristics for sampling, parsing, etc.
 end
 
@@ -121,7 +122,7 @@ function test_grammar1()
     c Cn -> x 1 | y 1
     """
     w_all, type = compile_rules(n_all, index, rules)
-    return GrammarEx(n_all..., w_all..., type, label, index, (;))
+    return GrammarEx(n_all..., w_all..., type, label, index, 1., (;))
 end
 
 "Basic logic"
@@ -152,7 +153,7 @@ function test_grammar2()
     or Fn -> 0 I 1 | 1 c1 1
     """
     w_all, type = compile_rules(n_all, index, rules)
-    return GrammarEx(n_all..., w_all..., type, label, index, (;))
+    return GrammarEx(n_all..., w_all..., type, label, index, 1., (;))
 end
 
 "Basic recursion"
@@ -180,7 +181,7 @@ function test_grammar3()
     cx Cn -> 1 1 | 2 1 | 3 1 | 4 1 | 5 1
     """
     w_all, type = compile_rules(n_all, index, rules)
-    return GrammarEx(n_all..., w_all..., type, label, index, (;))
+    return GrammarEx(n_all..., w_all..., type, label, index, 1., (;))
 end
 
 """
@@ -257,5 +258,6 @@ function generate_dataset(g::GrammarEx, n::Int=10)
 end
 
 # testing:
-g = test_grammar3()
-generate_dataset(g)
+# g = test_grammar2()
+# g = test_grammar3()
+# generate_dataset(g)
