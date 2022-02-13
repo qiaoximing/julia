@@ -89,11 +89,11 @@ function test1()
     g = init_grammar(0.1)
     cnt = 0
     println(dataset(10))
-    logprobs = []
-    for data in dataset(3000)
-        ps, logprob = parse_tdpf(data, g, 100, 20, true)
+    perplexity = []
+    for data in dataset(2000)
+        ps, logprob = parse_tdpf(data, g, 100, 10, true)
         isnan(logprob) && continue
-        push!(logprobs, logprob)
+        push!(perplexity, logprob / length(data))
         # t = sample_tdpf(ps)
         # t isa Tree && grammar_update!(g, t, 1.)
         weighted_trees = get_weighted_trees(ps)
@@ -104,12 +104,12 @@ function test1()
         grammar_decay!(g, 0.99)
     end
     for data in dataset(5)
-        ps, logprob = parse_tdpf(data, g, 100, 20, false)
+        ps, logprob = parse_tdpf(data, g, 100, 10, false)
         t = sample_tdpf(ps, 0.01)
-        println(data, " ", logprob)
+        println(data, " ", logprob / length(data))
         t isa Tree && print_tree(t, g)
     end
-    display(plot(smooth(logprobs)))
+    display(plot(smooth(perplexity)))
     # generate_dataset(g, 20)
     # println("Count: $cnt")
     println(maximum(g.w_cm2))
@@ -117,38 +117,47 @@ end
 
 function test2()
     dict = ["xx", "yy", "z"]
-    dataset(n) = [reduce(*, [rand(dict) for j in 1:2]) for i in 1:n]
+    dataset(n) = [reduce(*, [rand(dict) for j in 1:3]) for i in 1:n]
     # Random.seed!(0)
     g = init_grammar(0.1)
     cnt = 0
     println(dataset(10))
-    logprobs = []
+    perplexity = []
     for data in dataset(3000)
-        # println(data)
-        res, logprob = parse_tdss(data, g, 20, 10, true)
-        # println(logprob)
+        ps, logprob = parse_tdpf(data, g, 100, 10, true)
         isnan(logprob) && continue
-        push!(logprobs, logprob)
-        weighted_trees = get_weighted_trees(res, logprob)
+        push!(perplexity, logprob / length(data))
+        weighted_trees = get_weighted_trees(ps)
         cnt += 1
         for (t, w) in weighted_trees
             grammar_update!(g, t, w)
         end
         grammar_decay!(g, 0.99)
     end
-    for data in ("xxyy", "xxz", "zz")
-        res, logprob = parse_tdss(data, g, 20, 10, false)
-        println(data, " ", logprob)
+    # for data in dataset(1000)
+    #     res, logprob = parse_tdss(data, g, 10, 10, true)
+    #     isnan(logprob) && continue
+    #     push!(perplexity, logprob / length(data))
+    #     weighted_trees = get_weighted_trees(res, logprob)
+    #     cnt += 1
+    #     for (t, w) in weighted_trees
+    #         grammar_update!(g, t, w)
+    #     end
+    #     grammar_decay!(g, 0.99)
+    # end
+    for data in dataset(5)
+        res, logprob = parse_tdss(data, g, 10, 10, false)
+        println(data, " ", logprob / length(data))
         # length(res) > 0 && print_tree(get_tree(res[1]), g)
         count = 1
         for (t, w) in get_weighted_trees(res, logprob)
             println("Probability $w")
             print_tree(t, g)
             count += 1
-            count > 2 && break
+            count > 1 && break
         end
     end
-    display(plot(smooth(logprobs)))
+    display(plot(smooth(perplexity)))
     # generate_dataset(g, 20)
     println("Count: $cnt")
     println(maximum(g.w_cm2))

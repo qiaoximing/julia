@@ -12,28 +12,19 @@ struct Item
     loc::Int # location of next scan in input string
     stack::LinkedList{TDState} # top-down parse stack
     values::Vector{Int} # values in TDState
-    ances::Union{Item, Nothing} # ancestor of the particle
     iter::Int # number of step before an observation
-end
-
-mutable struct ItemWrapper
-    w::Float32 # weight for sorting
-    left::Int # left child
-    right::Int # right child
-    output::Int # output value
-    ances::Union{Item, Nothing} # ancestor to generate this item
-    item::Union{Item, Nothing} # the actual item
+    ances::Union{Item, Nothing} # ancestor of the particle
 end
 
 "Sort Items by weight"
 Base.:isless(x::Item,y::Item) = isless(x.w, y.w)
-Base.:isless(x::ItemWrapper,y::ItemWrapper) = isless(x.w, y.w)
 
 "Expand an item by one step" 
 function forward(item::Item, str::String, g::GrammarEx)
-    items_new = Vector{ItemWrapper}()
+    items_new = Vector{Item}()
     item.stack isa Nil && return items_new
     state = head(item.stack)
+    iter = item.iter
     sym, input = item.values[state.sym], item.values[state.input]
     type = g.type[sym]
     if type in Cm
@@ -41,13 +32,55 @@ function forward(item::Item, str::String, g::GrammarEx)
             prob_left > 0 || continue
             if type == U
                 w_new = item.w + log(prob_left)
-                item_new = ItemWrapper(w_new, left, 0, 0, item, nothing) 
+                values_new = copy(item.values)
+                push!(values_new, left)
+                state_child = TDState(length(values_new), state.input, state.output)
+                stack_new = cons(state_child, tail(item.stack))
+                item_new = Item(w_new, item.loc, stack_new, values_new, iter + 1, item)
                 push!(items_new, item_new)
             else
                 for (right, prob_right) in enumerate(g.h.p_right[:, left, sym])
                     prob_right > 0 || continue
                     w_new = item.w + log(prob_left) + log(prob_right)
-                    item_new = ItemWrapper(w_new, left, right, 0, item, nothing) 
+                    values_new = copy(item.values)
+                    stack_new = tail(item.stack)
+                    if type in (Ll, Pl)
+                        output_left = state.output
+                        push!(values_new, 0) # 0 as a placeholder
+                        output_right = length(values_new)
+                    elseif type in (Lr, Pr)
+                        push!(values_new, 0)
+                        output_left = length(values_new)
+                        output_right = state.output
+                    elseif type in (Llr, Plr)
+                        push!(values_new, 0)
+                        output_left = length(values_new)
+                        push!(values_new, 0)
+                        output_right = length(values_new)
+                        state_dynam = TDState(output_left, output_right, state.output)
+                        stack_new = cons(state_dynam, stack_new)
+                    else # type in (Lrl, Prl)
+                        push!(values_new, 0)
+                        output_left = length(values_new)
+                        push!(values_new, 0)
+                        output_right = length(values_new)
+                        state_dynam = TDState(output_right, output_left, state.output)
+                        stack_new = cons(state_dynam, stack_new)
+                    end
+                    # create left and right sub-trees, and push to stack
+                    if type in (Ll, Lr, Llr, Lrl)
+                        push!(values_new, left)
+                        state_left = TDState(length(values_new), state.input, output_left)
+                        push!(values_new, right)
+                        state_right = TDState(length(values_new), output_left, output_right)
+                    else # (Pl, Pr, Plr, Prl)
+                        push!(values_new, left)
+                        state_left = TDState(length(values_new), state.input, output_left)
+                        push!(values_new, right)
+                        state_right = TDState(length(values_new), state.input, output_right)
+                    end
+                    stack_new = cons(state_left, cons(state_right, stack_new))
+                    item_new = Item(w_new, item.loc, stack_new, values_new, iter + 1, item)
                     push!(items_new, item_new)
                 end
             end
@@ -56,14 +89,18 @@ function forward(item::Item, str::String, g::GrammarEx)
         for (output, prob_output) in enumerate(g.h.p_fn[:, input, offset(sym, g)])
             prob_output > 0 || continue
             w_new = item.w + log(prob_output)
-            item_new = ItemWrapper(w_new, 0, 0, output, item, nothing) 
+            values_new = copy(item.values)
+            values_new[state.output] = output
+            item_new = Item(w_new, item.loc, tail(item.stack), values_new, iter + 1, item)
             push!(items_new, item_new)
         end
     elseif type == Cn
         for (output, prob_output) in enumerate(g.h.p_cn[:, offset(sym, g)])
             prob_output > 0 || continue
             w_new = item.w + log(prob_output)
-            item_new = ItemWrapper(w_new, 0, 0, output, item, nothing) 
+            values_new = copy(item.values)
+            values_new[state.output] = output
+            item_new = Item(w_new, item.loc, tail(item.stack), values_new, iter + 1, item)
             push!(items_new, item_new)
         end
     elseif type == Tr
@@ -72,85 +109,18 @@ function forward(item::Item, str::String, g::GrammarEx)
         elseif sym != g.index[string(str[item.loc])]
             # println("input mismatch")
         else
-            item_new = ItemWrapper(item.w, 0, 0, 0, item, nothing) 
+            values_new = copy(item.values)
+            values_new[state.output] = input
+            item_new = Item(item.w, item.loc + 1, tail(item.stack), values_new, 1, item)
             push!(items_new, item_new)
         end
     else # type == Id
-        item_new = ItemWrapper(item.w, 0, 0, 0, item, nothing) 
+        values_new = copy(item.values)
+        values_new[state.output] = input
+        item_new = Item(item.w, item.loc, tail(item.stack), values_new, iter + 1, item)
         push!(items_new, item_new)
     end
     return items_new
-end
-
-function create_item!(wrap::ItemWrapper, g::GrammarEx)
-    item = wrap.ances
-    state = head(item.stack)
-    stack_new = tail(item.stack)
-    sym, input = item.values[state.sym], item.values[state.input]
-    type = g.type[sym]
-    if type in Cm
-        left = wrap.left
-        if type == U
-            values_new = copy(item.values)
-            push!(values_new, left)
-            state_child = TDState(length(values_new), state.input, state.output)
-            stack_new = cons(state_child, stack_new)
-            wrap.item = Item(wrap.w, item.loc, stack_new, values_new, item, item.iter + 1)
-        else
-            right = wrap.right
-            values_new = copy(item.values)
-            if type in (Ll, Pl)
-                output_left = state.output
-                push!(values_new, 0)
-                output_right = length(values_new)
-            elseif type in (Lr, Pr)
-                push!(values_new, 0)
-                output_left = length(values_new)
-                output_right = state.output
-            elseif type in (Llr, Plr)
-                push!(values_new, 0)
-                output_left = length(values_new)
-                push!(values_new, 0)
-                output_right = length(values_new)
-                state_dynam = TDState(output_left, output_right, state.output)
-                stack_new = cons(state_dynam, stack_new)
-            else # type in (Lrl, Prl)
-                push!(values_new, 0)
-                output_left = length(values_new)
-                push!(values_new, 0)
-                output_right = length(values_new)
-                state_dynam = TDState(output_right, output_left, state.output)
-                stack_new = cons(state_dynam, stack_new)
-            end
-            if type in (Ll, Lr, Llr, Lrl)
-                push!(values_new, left)
-                state_left = TDState(length(values_new), state.input, output_left)
-                push!(values_new, right)
-                state_right = TDState(length(values_new), output_left, output_right)
-            else # (Pl, Pr, Plr, Prl)
-                push!(values_new, left)
-                state_left = TDState(length(values_new), state.input, output_left)
-                push!(values_new, right)
-                state_right = TDState(length(values_new), state.input, output_right)
-            end
-            stack_new = cons(state_left, cons(state_right, stack_new))
-            wrap.item = Item(wrap.w, item.loc, stack_new, values_new, item, item.iter + 1)
-        end
-    elseif type == Fn || type == Cn
-        output = wrap.output
-        values_new = copy(item.values)
-        values_new[state.output] = output
-        wrap.item = Item(wrap.w, item.loc, stack_new, values_new, item, item.iter + 1)
-    elseif type == Tr
-        values_new = copy(item.values)
-        values_new[state.output] = values_new[state.input]
-        # reset iter count
-        wrap.item = Item(wrap.w, item.loc + 1, stack_new, values_new, item, 1)
-    else # type == Id
-        values_new = copy(item.values)
-        values_new[state.output] = values_new[state.input]
-        wrap.item = Item(wrap.w, item.loc, stack_new, values_new, item, item.iter + 1)
-    end
 end
 
 "Merge new items to heap.
@@ -164,9 +134,9 @@ function merge!(heap::BinaryMinMaxHeap, items::Vector, heap_size::Int)
             item2 = popmin!(heap)
             w_max = max(item1.w, item2.w)
             prob1 = exp(item1.w - w_max) / (exp(item1.w - w_max) + exp(item2.w - w_max))
-            item_new = rand() < prob1 ? item1 : item2
+            itemx = rand() < prob1 ? item1 : item2
             w_new = log(exp(item1.w - w_max) + exp(item2.w - w_max)) + w_max
-            item_new.w = w_new
+            item_new = Item(w_new, itemx.loc, itemx.stack, itemx.values, itemx.iter, itemx.ances)
             push!(heap, item_new)
         end
     end
@@ -228,32 +198,27 @@ function parse_tdss(str::String, g::GrammarEx, heap_size::Int=4, max_iter::Int=1
     g.h = (; p_fn, p_cn, p_left, p_right)
     # initialize a minmax heap sorted by item.w
     state_init = TDState(1, 2, 3)
-    item_init = Item(0., 1, list(state_init), [1, 1, 0], nothing, 1)
-    heap = BinaryMinMaxHeap([ItemWrapper(0., 0, 0, 0, nothing, item_init)])
+    item_init = Item(0., 1, list(state_init), [1, 1, 0], 1, nothing)
+    heap = BinaryMinMaxHeap([item_init])
     result = Vector{Item}()
     # start parsing
     while length(heap) > 0
         # progress the particle with the highest score
-        itemwrapper = popmax!(heap)
-        if itemwrapper.item === nothing
-            create_item!(itemwrapper, g)
-        end
-        item = itemwrapper.item
+        item = popmax!(heap)
         # print_item(item, g)
         if finish(item, str)
             push!(result, item)
             heap_size -= 1
         elseif item.iter <= max_iter
-            itemwrappers = forward(item, str, g)
+            items_new = forward(item, str, g)
             # merge to heap
-            merge!(heap, itemwrappers, heap_size)
+            merge!(heap, items_new, heap_size)
         else
             # println("exceeding max iter")
         end
     end
     ws = [item.w for item in result]
     logprob = length(ws) > 0 ? log(sum(exp.(ws .- maximum(ws)))) + maximum(ws) : NaN
-    logprob /= length(str)
     return result, logprob
 end
 

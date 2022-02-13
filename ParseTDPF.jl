@@ -195,7 +195,6 @@ function parse_tdpf(str::String, g::GrammarEx, n_particle::Int=4, max_iter::Int=
         debugln("Simulating particle $i")
         particles[i] = forward(p, 0, g, max_iter)
     end
-    logprob /= length(str)
     return particles, logprob
 end
 
