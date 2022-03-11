@@ -107,7 +107,7 @@ end
 "Repeating element"
 function test_grammar1()
     cm, fn, cn, tr, id = split.((
-    "S A B",
+    "S A B C",
     "f",
     "c",
     "x y z",
@@ -117,9 +117,33 @@ function test_grammar1()
     index = Dict(reverse.(enumerate(label)))
     rules = """
     S Lr -> c A 1
+    A Lr -> B C 1
+    B Plr -> I I 1
+    C Plr -> z I 1
+    c Cn -> x 1 | y 1
+    """
+    w_all, type = compile_rules(n_all, index, rules)
+    return GrammarEx(n_all..., w_all..., type, label, index, 1., (;))
+end
+
+"Repeating element (alternativ)"
+function test_grammar1x()
+    cm, fn, cn, tr, id = split.((
+    "S A B C D",
+    "f",
+    "c",
+    "x y z",
+    "I"), " ")
+    n_all = cumsum(length.((cm, fn, cn, tr, id)))
+    label = [cm; fn; cn; tr; id]
+    index = Dict(reverse.(enumerate(label)))
+    rules = """
+    S Lr -> C A 1
     A Lr -> B B 1
     B Plr -> I I 1
-    c Cn -> x 1 | y 1
+    C Lr -> c B 1
+    D U -> x 1 | y 1
+    c Cn -> D 1
     """
     w_all, type = compile_rules(n_all, index, rules)
     return GrammarEx(n_all..., w_all..., type, label, index, 1., (;))
@@ -175,10 +199,10 @@ function test_grammar3()
     G Lr -> isone fRec 1
     H Lr -> x prev 1
     P Plr -> I I 1
-    isone Fn -> 1 true 1 | 2 false 1 | 3 false 1 | 4 false 1 | 5 false 1
-    prev Fn -> 1 0 1 | 2 1 1 | 3 2 1 | 4 3 1 | 5 4 1
+    isone Fn -> 1 true 1 | 2 false 1 | 3 false 1 | 4 false 1
+    prev Fn -> 1 0 1 | 2 1 1 | 3 2 1 | 4 3 1
     fRec Fn -> true I 1 | false Rec 1
-    cx Cn -> 1 1 | 2 1 | 3 1 | 4 1 | 5 1
+    cx Cn -> 1 1 | 2 1 | 3 1 | 4 1
     """
     w_all, type = compile_rules(n_all, index, rules)
     return GrammarEx(n_all..., w_all..., type, label, index, 1., (;))
@@ -260,4 +284,5 @@ end
 # testing:
 # g = test_grammar2()
 # g = test_grammar3()
+# g = test_grammar1()
 # generate_dataset(g)

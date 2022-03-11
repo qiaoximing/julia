@@ -223,12 +223,12 @@ function parse_tdss(str::String, g::GrammarEx, heap_size::Int=4, max_iter::Int=1
 end
 
 # testing
-# g = test_grammar1()
-# data = "xx"
+g = test_grammar1()
+data = "xzx"
 # g = test_grammar2()
 # data = "1+0=1"
 # g = test_grammar3()
 # data = "3=xxx"
-# res, logprob = parse_tdss(data, g, 10, 30, false)
+res, logprob = parse_tdss(data, g, 10, 30, false)
 # println(logprob)
 # print_tree(get_tree(res[1]), g)

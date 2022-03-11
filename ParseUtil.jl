@@ -6,6 +6,12 @@ struct TDState
     output::Int
 end
 
+struct BUState
+    sym::Int
+    input::Int
+    output::Int
+end
+
 "parse tree"
 struct Tree
     state::TDState # a tree node

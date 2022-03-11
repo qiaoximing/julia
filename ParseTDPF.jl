@@ -7,21 +7,21 @@ include("GrammarEx.jl")
 include("ParseUtil.jl")
 
 "Particle state"
-struct Particle
+struct TDParticle
     w::Float32 # particle weight
     stack::LinkedList{TDState} # top-down parse stack
     values::Vector{Int} # values in TDState
-    ances::Union{Particle, Nothing} # ancestor of the particle
+    ances::Union{TDParticle, Nothing} # ancestor of the particle
 end
-Base.copy(p::Particle) = Particle(p.w, p.stack, copy(p.values), p.ances)
+Base.copy(p::TDParticle) = TDParticle(p.w, p.stack, copy(p.values), p.ances)
 
 "Progress a particle forward to the next observation"
-function forward(ptl::Particle, obs::Int, g::GrammarEx, max_iter::Int)
+function forward(ptl::TDParticle, obs::Int, g::GrammarEx, max_iter::Int)
     iter = 1
     while !isa(ptl.stack, Nil) # stack not empty
         if iter > max_iter
             debugln("Too many iterations between observation")
-            return Particle(0., ptl.stack, ptl.values, ptl)
+            return TDParticle(0., ptl.stack, ptl.values, ptl)
         else
             iter += 1
         end
@@ -93,13 +93,13 @@ function forward(ptl::Particle, obs::Int, g::GrammarEx, max_iter::Int)
             ptl.values[state.output] = ptl.values[state.input]
             w_new = ptl.w * (sym == obs ? 1. : 0.)
             # exit the loop
-            return Particle(w_new, stack_new, ptl.values, ptl)
+            return TDParticle(w_new, stack_new, ptl.values, ptl)
         else # type == Id
             # write to shared output, pop stack
             ptl.values[state.output] = ptl.values[state.input]
         end
         # if not producing an observation, update particle and continue
-        ptl = Particle(ptl.w, stack_new, ptl.values, ptl)
+        ptl = TDParticle(ptl.w, stack_new, ptl.values, ptl)
         label = x -> ptl.values[x] == 0 ? '?' : g.label[ptl.values[x]]
         for s in ptl.stack
             debug('(', label(s.sym), ' ', label(s.input), ' ', label(s.output), ") ")
@@ -108,7 +108,7 @@ function forward(ptl::Particle, obs::Int, g::GrammarEx, max_iter::Int)
     end
     if obs != 0
         debugln("Parse finishes too early")
-        return Particle(0., ptl.stack, ptl.values, ptl)
+        return TDParticle(0., ptl.stack, ptl.values, ptl)
     else
         debugln("Parse finishes correctly")
         return ptl
@@ -116,17 +116,17 @@ function forward(ptl::Particle, obs::Int, g::GrammarEx, max_iter::Int)
 end
 
 "Effective sample size (ESS) of a particle system"
-function effective_size(particles::Vector{Particle})
+function effective_size(particles::Vector{TDParticle})
     weights = [p.w for p in particles]
     return sum(weights) ^ 2 / sum(weights .^ 2)
 end
 
 "Resample the particle system to the target number"
-function resample(particles::Vector{Particle}, target_num::Int)
+function resample(particles::Vector{TDParticle}, target_num::Int)
     weights = [p.w for p in particles]
     samples = first.(sample_n(normalize(weights), target_num, :systematic))
     debugln("Resampling: ancestor indices are $samples")
-    particles_new = Vector{Particle}()
+    particles_new = Vector{TDParticle}()
     for i in samples
         push!(particles_new, copy(particles[i]))
     end
@@ -134,7 +134,7 @@ function resample(particles::Vector{Particle}, target_num::Int)
 end
 
 "Print a particle"
-function print_particle(ptl::Particle, g::GrammarEx)
+function print_particle(ptl::TDParticle, g::GrammarEx)
     debugln("Particle weight: $(ptl.w)")
     label = x -> ptl.values[x] == 0 ? '?' : g.label[ptl.values[x]]
     for s in ptl.stack
@@ -161,8 +161,8 @@ function parse_tdpf(str::String, g::GrammarEx, n_particle::Int=4, max_iter::Int=
     # initialize particles
     # n_particle = 4
     state_init = TDState(1, 2, 3)
-    particle_init = Particle(1., list(state_init), [1, 1, 0], nothing)
-    particles = Vector{Particle}()
+    particle_init = TDParticle(1., list(state_init), [1, 1, 0], nothing)
+    particles = Vector{TDParticle}()
     for i in 1:n_particle
         push!(particles, copy(particle_init))
     end
@@ -179,7 +179,7 @@ function parse_tdpf(str::String, g::GrammarEx, n_particle::Int=4, max_iter::Int=
         total_weight = sum([p.w for p in particles])
         if total_weight <= 0.
             debugln("All particles fail")
-            return Vector{Particle}(), NaN
+            return Vector{TDParticle}(), NaN
         end
         logprob += log(total_weight / n_particle)
         # resample is effective sample size too small
@@ -200,7 +200,7 @@ end
 
 "Sample a parse tree from a particle system.
  Use temperature to adjust weights"
-function sample_tdpf(particles::Vector{Particle}, temp::Number=1.)
+function sample_tdpf(particles::Vector{TDParticle}, temp::Number=1.)
     if length(particles) == 0 || effective_size(particles) == 0
         debugln("No particles to sample")
         return
@@ -236,11 +236,13 @@ function sample_tdpf(particles::Vector{Particle}, temp::Number=1.)
 end
 
 # testing
+# g = test_grammar1()
+# data = "xzx"
 # g = test_grammar2()
 # data = "1+0=1"
 # g = test_grammar3()
 # data = "3=xxx"
 # ps, logprob = parse_tdpf(data, g, 100)
 # tr = sample_tdpf(ps)
-# println(logprob)
+# println(data)
 # tr isa Tree && print_tree(tr, g)

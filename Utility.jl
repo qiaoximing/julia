@@ -32,13 +32,15 @@ end
 "sample from a probability mass function"
 function sample(x::Array{Float32})
     r = rand(Float32) # random float in [0, 1)
+    default = rand(1:length(x))
     for i in eachindex(x)
         r -= x[i]
         if r < 0
             return i, x[i]
         end
     end
-    return 0, 1 - sum(x)
+    warning("sample 0 with prob $(1-sum(x))")
+    return default, 1 - sum(x)
 end
 
 "sample n times from a probability mass function"
@@ -47,6 +49,7 @@ function sample_n(x::Array{Float32}, n::Int, method::Symbol=:systematic)
         return [sample(x) for i in 1:n]
     elseif method == :systematic
         r = rand(Float32) / n
+        default = rand(1:length(x))
         result = []
         for i in eachindex(x)
             r -= x[i]
@@ -56,7 +59,8 @@ function sample_n(x::Array{Float32}, n::Int, method::Symbol=:systematic)
             end
         end
         while length(result) < n
-            push!(result, (0, 1-sum(x)))
+            warning("sample 0 with prob $(1-sum(x))")
+            push!(result, (default, 1-sum(x)))
         end
         return result
     else
