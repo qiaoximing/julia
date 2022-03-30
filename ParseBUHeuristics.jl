@@ -8,12 +8,20 @@ include("Learning1.jl")
 mutable struct BUHeuristics
     decay::Float32 # decay rate of moving average
     tot::Float32 # total symbol count
-    sym::Vector{Float32} # symbol count
-    in::Matrix{Float32} # input count per symbol
-    out::Array{Float32, 3} # output count per symbol-input
+    sym::Vector{Float32} # symbol prob
+    nul::Vector{Float32} # null prob per symbol
+    in::Matrix{Float32} # input prob per symbol
+    out::Matrix{Float32} # output prob per symbol
+    oi::Array{Float32, 3} # output prob per symbol-input
+    io::Array{Float32, 3} # input prob per symbol-output
 end
-BUHeuristics(decay, n) = BUHeuristics(decay, 1, ones(Float32, n), 
-    ones(Float32, n, n), ones(Float32, n, n, n))
+BUHeuristics(decay, n) = BUHeuristics(decay, 1, 
+    ones(Float32, n), 
+    ones(Float32, n), 
+    ones(Float32, n, n), 
+    ones(Float32, n, n), 
+    ones(Float32, n, n, n), 
+    ones(Float32, n, n, n))
 
 function count_sym!(h::BUHeuristics, sym, w=1)
     h.sym .*= 1 - h.decay * w
@@ -24,10 +32,51 @@ function count_in!(h::BUHeuristics, in, sym, w=1)
     h.in[:, sym] .*= 1 - h.decay * w
     h.in[in, sym] += h.decay * w
 end
+function count_out!(h::BUHeuristics, out, sym, w=1)
+    h.out[:, sym] .*= 1 - h.decay * w
+    h.out[out, sym] += h.decay * w
+end
 
-function count_out!(h::BUHeuristics, out, in, sym, w=1)
-    h.out[:, in, sym] .*= 1 - h.decay * w
-    h.out[out, in, sym] += h.decay * w
+function count_oi!(h::BUHeuristics, out, in, sym, w=1)
+    h.oi[:, in, sym] .*= 1 - h.decay * w
+    h.oi[out, in, sym] += h.decay * w
+end
+function count_io!(h::BUHeuristics, in, out, sym, w=1)
+    h.io[:, out, sym] .*= 1 - h.decay * w
+    h.io[in, out, sym] += h.decay * w
+end
+
+function count_nul!(h::BUHeuristics, isnul, sym, w=1)
+    h.nul[sym] .*= 1 - h.decay * w
+    isnul && h.nul[sym] += h.decay * w
+end
+
+function get_prob(h::BUHeuristics, sym, in=0, out=0)
+    if in == 0 && out == 0
+        return h.sym[sym]
+    elseif out == 0
+        return h.sym[sym] * h.in[in, sym]
+    elseif in == 0
+        return h.sym[sym] * h.out[out, sym]
+    else
+        return h.sym[sym] * h.in[in, sym], h.oi[out, in, sym]
+    end
+end
+
+function get_nul(h::BUHeuristics, sym)
+    return sym > 0 ? h.nul[sym] : h.sym' * h.nul
+end
+function get_nul_out(h::BUHeuristics, sym, in)
+    return in > 0 ? h.oi[:, in, sym]' * h.nul : h.out[:, sym]' * h.nul
+end
+function get_nul_out_syms(h::BUHeuristics, in)
+    return in > 0 ? h.oi[:, in, :]' * h.nul : h.out' * h.nul
+end
+function get_nul_left(h::BUHeuristics, g::GrammarEx, sym, left)
+    return normalize(g.w_cm2[:, left, sym])' * h.nul
+end
+function get_nul_right(h::BUHeuristics, g::GrammarEx, sym, right)
+    return normalize(g.w_cm2[right, :, sym])' * h.nul
 end
 
 function simulate!(h::BUHeuristics, sym::Int, input::Int, g::GrammarEx)
@@ -37,9 +86,10 @@ function simulate!(h::BUHeuristics, sym::Int, input::Int, g::GrammarEx)
     count_in!(h, input, sym)
     if type in Cm
         left, _ = sample(g.h.p_left[:, sym])
-        output_left = simulate!(h, left, input, g)
+        output_left, isnul_left = simulate!(h, left, input, g)
         if type == U
             output = output_left
+            isnul = isnul_left
         else
             right, _ = sample(g.h.p_right[:, left, sym])
             if type in (Ll, Lr, Llr, Lrl)
@@ -47,29 +97,40 @@ function simulate!(h::BUHeuristics, sym::Int, input::Int, g::GrammarEx)
             else # type in (Pl, Pr, Plr, Prl)
                 input_right = input
             end
-            output_right = simulate!(h, right, input_right, g)
+            output_right, isnul_right = simulate!(h, right, input_right, g)
             if type in (Ll, Pl)
                 output = output_left
+                isnul = isnul_left && isnul_right
             elseif type in (Lr, Pr)
                 output = output_right
+                isnul = isnul_left && isnul_right
             elseif type in (Llr, Plr)
-                output = simulate!(h, output_left, output_right, g)
+                output, isnul_dynam = simulate!(h, output_left, output_right, g)
+                isnul = isnul_left && isnul_right && isnul_dynam
             else # type in (Lrl, Prl) 
-                output = simulate!(h, output_right, output_left, g)
+                output, isnul_dynam = simulate!(h, output_right, output_left, g)
+                isnul = isnul_left && isnul_right && isnul_dynam
             end
         end
     elseif type == Fn
         output, _ = sample(g.h.p_fn[:, input, offset(sym, g)])
+        isnul == true
     elseif type == Cn
         output, _ = sample(g.h.p_cn[:, offset(sym, g)])
+        isnul == true
     elseif type == Tr
         # write(io, g.label[sym])
         output = input
+        isnul == false
     else # type == Id
         output = input
+        isnul == true
     end
-    count_out!(h, output, input, sym)
-    return output
+    count_out!(h, output, sym)
+    count_oi!(h, output, input, sym)
+    count_io!(h, input, output, sym)
+    count_nul!(h, isnul, sym)
+    return output, isnul
 end
 
 function learn_from_grammar(g::GrammarEx, n)
@@ -87,7 +148,9 @@ function update!(h::BUHeuristics, t::Tree, w)
     h.tot += h.decay * w
     count_sym!(h, sym, w)
     count_in!(h, in, sym, w)
-    count_out!(h, out, in, sym, w)
+    count_out!(h, out, sym, w)
+    count_oi!(h, out, in, sym, w)
+    count_io!(h, in, out, sym, w)
     for child in (t.left, t.right, t.dynam)
         if child !== nothing
             update!(h, child, w)
