@@ -63,20 +63,22 @@ function get_prob(h::BUHeuristics, sym, in=0, out=0)
     end
 end
 
-function get_nul(h::BUHeuristics, sym)
+function get_nul(h::BUHeuristics, sym=0)
     return sym > 0 ? h.nul[sym] : h.sym' * h.nul
 end
-function get_nul_out(h::BUHeuristics, sym, in)
+function get_nul_out(h::BUHeuristics, sym, in=0)
     return in > 0 ? h.oi[:, in, sym]' * h.nul : h.out[:, sym]' * h.nul
 end
-function get_nul_out_syms(h::BUHeuristics, in)
+function get_nul_out_syms(h::BUHeuristics, in=0)
     return in > 0 ? h.oi[:, in, :]' * h.nul : h.out' * h.nul
 end
-function get_nul_left(h::BUHeuristics, g::GrammarEx, sym, left)
-    return normalize(g.w_cm2[:, left, sym])' * h.nul
+function get_nul_right(h::BUHeuristics, g::GrammarEx, sym, left=0)
+    return left > 0 ? normalize(g.w_cm2[:, left, sym])' * h.nul :
+                      g.h.p_r[:, sym]' * h.nul
 end
-function get_nul_right(h::BUHeuristics, g::GrammarEx, sym, right)
-    return normalize(g.w_cm2[right, :, sym])' * h.nul
+function get_nul_left(h::BUHeuristics, g::GrammarEx, sym, right=0)
+    return right > 0 ? normalize(g.w_cm2[right, :, sym])' * h.nul :
+                      g.h.p_r[:, sym]' * h.nul
 end
 
 function simulate!(h::BUHeuristics, sym::Int, input::Int, g::GrammarEx)

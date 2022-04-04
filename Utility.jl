@@ -17,6 +17,13 @@ function relative_error(target, estimate)
     return maximum(abs.(target - estimate)) / maximum(abs.(target))
 end
 
+"one-hot vector"
+function onehot(size, x)
+    vec = zeros(Float32, size)
+    vec[x] = 1
+    return vec
+end
+
 normalize(x; dims=1) = x ./ sum(x, dims=dims)
 
 "suppress NaN for 0/0"
