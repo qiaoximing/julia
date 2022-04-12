@@ -1,4 +1,4 @@
-inlcude("ParseBUHeuristics.jl")
+include("ParseBUHeuristics.jl")
 
 "Factor for value sampling"
 struct Factor 
@@ -24,7 +24,7 @@ struct BUParticle
     w::Float32 # particle weight
     stack::LinkedList{BUState} # bottom-up parse stack
     values::Vector{Int} # values in BUState
-    dset::IntDisjointSet # disjoint set for value indexing
+    dset::IntDisjointSets # disjoint set for value indexing
     factors::Vector{Factors} # related factors for each value
     ances::Union{BUParticle, Nothing} # ancestor of the particle
 end
@@ -44,7 +44,7 @@ function get_sio(ptl, depth)
     else
         for i in 2:depth stack = tail(stack) end
         h = head(stack)
-        return getval(ptl, h.sym), getval(ptl, h.input), getval(ptl, h.output)
+        return getval(ptl, h.sym), getval(ptl, h.in), getval(ptl, h.out)
     end
 end
 
@@ -52,7 +52,7 @@ end
 match(a, b) = a == 0 || b == 0 || a == b
 
 "Evaluate weights for action sampling"
-function action_weights(ptl, h, g)
+function action_weights_old(ptl, h, g)
     # get the top symbols
     As, Ai, Ao = get_sio(ptl, 1)
     Bs, Bi, Bo = get_sio(ptl, 2)
@@ -79,17 +79,22 @@ function action_weights(ptl, h, g)
             # A as left child, unknown right child
             Pi = Ai
             Po = Pt in (Ll, Pl) ? Ao : 0
-            p = get_prob(h, Ps, Pi, Po)
-            e = get_nul_right(h, g, Ps, As)
-            w_Ae[Ps] += p * e # not observed
-            w_sft += p * (1 - e) # shift if observed (Az)
+            p = get_prob(h, Ps, Pi, Po) * g.h.p_l[As, Ps]
+            if p > 0
+                e = get_nul_right(h, g, Ps, As)
+                w_Ae[Ps] += p * e # not observed
+                w_sft += p * (1 - e) # shift if observed (Az)
+            end
             # A as right child, unknown null left child
             Pi = Pt in (Ll, Lr) ? 0 : Ai
             Po = Pt in (Ll, Pl) ? 0 : Ao
-            p = get_prob(h, Ps, Pi, Po)
-            e = get_nul_left(h, g, Ps, As)
-            w_eA[Ps] += p * e
+            p = get_prob(h, Ps, Pi, Po) * g.h.p_r[As, Ps]
+            if p > 0 
+                e = get_nul_left(h, g, Ps, As)
+                w_eA[Ps] += p * e
+            end
             # A as right child, B as left child
+            # TODO: need to factor in the match likelihood
             if Bs !== nothing && (Pt in (Ll, Lr) ? match(Bo, Ai) : match(Bi, Ai))
                 Pi = Pt in (Ll, Lr) ? Bi : max(Bi, Ai)
                 Po = Pt in (Ll, Pl) ? Bo : Ao
@@ -99,42 +104,46 @@ function action_weights(ptl, h, g)
             # A left, unknown right
             Pi = Ai
             Po = 0
-            p = get_prob(h, Ps, Pi, Po)
-            if Pt in (Llr, Plr) 
-                e1 = get_nul_right(h, g, Ps, As) # null right
-                e2 = Ao > 0 ? get_nul(h, Ao) : get_nul_out(h, As, Ai) # null dynam
-                ee = e1 * e2 # assume independent right and dynam
-            else # ?rl
-                Di = Ao # dynam in
-                ee = normalize(g.w_cm2[:, As, Ps])' * (h.nul .* get_nul_out_syms(h, Di))
+            p = get_prob(h, Ps, Pi, Po) * g.h.p_l[As, Ps]
+            if p > 0
+                if Pt in (Llr, Plr) 
+                    e1 = get_nul_right(h, g, Ps, As) # null right
+                    e2 = Ao > 0 ? get_nul(h, Ao) : get_nul_out(h, As, Ai) # null dynam
+                    ee = e1 * e2 # assume independent right and dynam
+                else # ?rl
+                    Di = Ao # dynam in
+                    ee = normalize(g.w_cm2[:, As, Ps])' * (h.nul .* get_nul_out_syms(h, Di))
+                end
+                w_Aee[Ps] += p * ee # both unobserved
+                w_sft += p * (1 - ee) # any is observed (Aze, Aez, Azz)
             end
-            w_Aee[Ps] += p * ee # both unobserved
-            w_sft += p * (1 - ee) # any is observed (Aze, Aez, Azz)
             # A right, unknown null left
             Pi = Pt in (Llr, Lrl) ? 0 : Ai
             Po = 0
-            p = get_prob(h, Ps, Pi, Po)
-            if Pt in (Llr, Plr) 
-                Di = Ao # dynam in
-                ee = normalize(g.w_cm2[As, :, Ps])' * (h.nul .* get_nul_out_syms(h, Di))
-                ez = normalize(g.w_cm2[As, :, Ps])' * (h.nul .* (1 .- get_nul_out_syms(h, Di)))
-            else
-                e1 = get_nul_left(h, g, Ps, As)
-                e2 = Ao > 0 ? get_nul(h, Ao) : get_nul_out(h, As, Ai) # null dynam
-                ee = e1 * e2 
-                ez = e1 * (1 - e2)
+            p = get_prob(h, Ps, Pi, Po) * g.h.p_r[As, Ps]
+            if p > 0 
+                if Pt in (Llr, Plr) 
+                    Di = Ao # dynam in
+                    ee = normalize(g.w_cm2[As, :, Ps])' * (h.nul .* get_nul_out_syms(h, Di))
+                    ez = normalize(g.w_cm2[As, :, Ps])' * (h.nul .* (1 .- get_nul_out_syms(h, Di)))
+                else
+                    e1 = get_nul_left(h, g, Ps, As)
+                    e2 = Ao > 0 ? get_nul(h, Ao) : get_nul_out(h, As, Ai) # null dynam
+                    ee = e1 * e2 
+                    ez = e1 * (1 - e2)
+                end
+                w_eAe[Ps] += p * ee
+                w_sft += p * ez # shift if (eAz)
             end
-            w_eAe[Ps] += p * ee
-            w_sft += p * ez # shift if (eAz)
             # A right, B left
             if Bs !== nothing && (Pt in (Llr, Lrl) ? match(Bo, Ai) : match(Bi, Ai))
                 Pi = Pt in (Llr, Lrl) ? Bi : max(Bi, Ai)
                 Po = 0
                 p = get_prob(h, Ps, Pi, Po) * g.h.p_cm2[As, Bs, Ps] 
                 if Pt in (Llr, Plr)
-                    e = Bo > 0 : get_nul(h, Bo) : get_nul_out(h, Bs, Bi)
+                    e = Bo > 0 ? get_nul(h, Bo) : get_nul_out(h, Bs, Bi)
                 else
-                    e = Bo > 0 : get_nul(h, Ao) : get_nul_out(h, As, Ai)
+                    e = Bo > 0 ? get_nul(h, Ao) : get_nul_out(h, As, Ai)
                 end
                 w_BAe[Ps] += p * e
                 w_sft += p * (1 - e) # shift if (BAz)
@@ -144,46 +153,65 @@ function action_weights(ptl, h, g)
             Po = Ao
             p = get_prob(h, Ps, Pi, Po)
             ee = h.nul' * g.h.p_cm2[:, :, Ps] * h.nul
-            w_eeA[Ps] += p * e
+            w_eeA[Ps] += p * ee
             # A dynam, B left, unknown right
             if Bs !== nothing 
                 Pi = Bi
                 Po = Ao
-                p = get_prob(h, Ps, Pi, Po)
-                if Pt in (Llr, Plr) && match(Bo, As)
-                    e = get_nul_right(h, g, Ps, Bs)
-                    w_BeA[Ps] += p * e
-                elseif Pt in (Lrl, Prl)
-                    e = get_nul_right(h, g, Ps, Bs)
-                    w_BeA[Ps] += p * e
+                p = get_prob(h, Ps, Pi, Po) * g.h.p_l[Bs, Ps]
+                if p > 0 
+                    if Pt in (Llr, Plr) && match(Bo, As)
+                        e = get_nul_right(h, g, Ps, Bs)
+                        w_BeA[Ps] += p * e
+                    elseif Pt in (Lrl, Prl)
+                        e = get_nul_right(h, g, Ps, Bs)
+                        w_BeA[Ps] += p * e
+                    end
                 end
             end
             # A dynam, B right, unknown left
             if Bs !== nothing 
                 Pi = Pt in (Llr, Lrl) ? 0 : Bi
                 Po = Ao
-                p = get_prob(h, Ps, Pi, Po)
-                if Pt in (Llr, Plr)
-                    e = get_nul_left(h, g, Ps, Bs)
-                    w_eBA[Ps] += p * e
-                elseif Pt in (Lrl, Prl) && match(Bo, As)
-                    e = get_nul_left(h, g, Ps, Bs)
-                    w_eBA[Ps] += p * e
+                p = get_prob(h, Ps, Pi, Po) * g.h.p_r[Bs, Ps]
+                if p > 0 
+                    if Pt in (Llr, Plr)
+                        e = get_nul_left(h, g, Ps, Bs)
+                        w_eBA[Ps] += p * e
+                    elseif Pt in (Lrl, Prl) && match(Bo, As)
+                        e = get_nul_left(h, g, Ps, Bs)
+                        w_eBA[Ps] += p * e
+                    end
                 end
             end
             # A dynam, B right, C left
             if Bs !== nothing && Cs !== nothing
                 if (Pt in (Llr, Lrl) ? match(Co, Bi) : match(Ci, Bi)) &&
-                (Pt in (Llr, Plr) ? match(Co, As) && match(Bo, Ai) : 
-                                    match(Bo, As) && match(Co, Ai))
+                   (Pt in (Llr, Plr) ? match(Co, As) && match(Bo, Ai) : 
+                                       match(Bo, As) && match(Co, Ai))
                     Pi = Pt in (Llr, Lrl) ? Ci : max(Ci, Bi)
-                    Po = A0
+                    Po = Ao
                     w_CBA[Ps] += get_prob(h, Ps, Pi, Po) * g.h.p_cm2[Bs, Cs, Ps]
                 end
             end
         end
     end
-    return ([w_sft], w_A, w_Ae, w_eA, w_BA, 
+    debugln("A: $As, $Ai, $Ao")
+    debugln("B: $Bs, $Bi, $Bo")
+    debugln("C: $Cs, $Ci, $Co")
+    # debugln("sft: ", w_sft)
+    # debugln("A: ", w_A)
+    # debugln("Ae: ", w_Ae)
+    # debugln("eA: ", w_eA)
+    # debugln("BA: ", w_BA)
+    # debugln("Aee: ", w_Aee)
+    # debugln("eAe: ", w_eAe)
+    # debugln("BAe: ", w_BAe)
+    # debugln("eeA: ", w_eeA)
+    # debugln("BeA: ", w_BeA)
+    # debugln("eBA: ", w_eBA)
+    # debugln("CBA: ", w_CBA)
+    return ([Float32(w_sft)], w_A, w_Ae, w_eA, w_BA, 
             w_Aee, w_eAe, w_BAe, w_eeA, w_BeA, w_eBA, w_CBA)
 end
 
@@ -191,10 +219,10 @@ function decode_action(x, n)
     if x == 1
         return :sft, 0
     else
-        div, rem = divrem(x - 1, n)
+        x -= 1
+        action_idx, action_Ps = divrem(x - 1, n) .+ 1
         action = (:A, :Ae, :eA, :BA, :Aee, :eAe, :BAe, 
-                  :eeA, :BeA, :eBA, :CBA)[div + 1]
-        action_Ps = rem + 1
+                  :eeA, :BeA, :eBA, :CBA)[action_idx]
         return action, action_Ps
     end
 end
@@ -227,6 +255,7 @@ end
 function pushval!(ptl, x=0)
     push!(ptl.values, x) 
     push!(ptl.dset)
+    push!(ptl.factors, Factors())
     # should always have length(ptl.dset) == length(ptl.values)
     return length(ptl.values)
 end
@@ -260,7 +289,7 @@ function eval(ptl::BUParticle, factor::Factor, g, h)
     rel = factor.relation
     type = g.type[sym]
     if type in (Id, Tr)
-        # onehot_(x) = x > 0 ? onehot(g.size, x) : w_def
+        # onehot_(x) = x > 0 ? onehot(size(g), x) : w_def
         warning("Factor on Id or Tr")
     elseif type == Cn
         rel == :out && return h.out[:, sym]
@@ -283,7 +312,7 @@ function addleaf!(ptl, g; sym, in, out)
     if type == Tr
         warning("Expanding observations")
     elseif type == Id
-        mergeval!(ptl, in, out)
+        mergeval!(ptl, in, out) || warning("Merge fail")
     else
         addfactor!(ptl, in, state, :in)
         addfactor!(ptl, out, state, :out)
@@ -294,10 +323,12 @@ end
 "Perform reduction, and sample values that are ready"
 function addroot!(ptl, g; sym, in, out, left=nothing, right=nothing, dynam=nothing)
     P = BUState(sym, in, out)
-    type = g.type[getval(ptl, sym)]
-    if type == Lr
+    Pt = g.type[getval(ptl, sym)]
+    if Pt == Lr
         sampleval!(ptl, left.out)
-    elseif type in (Llr, Lrl, Plr, Prl)
+    end
+    if Pt == Llr || Pt == Lrl || Pt == Plr || Pt == Prl
+    # if Pt in (Llr, Lrl, Plr, Prl)
         sampleval!(ptl, left.out)
         sampleval!(ptl, right.out)
     end
@@ -318,25 +349,8 @@ function sampleval!(ptl, x)
     end
 end
 
-function samplesym(g, h, action, Pv, Av, Bv=0)
-    if action == :Ae
-        left = Av
-    elseif action == :eA
-        right = Av
-    elseif action == :Aee
-        left = Av
-    elseif action == :eAe
-        right = Av
-    elseif action == :eeA
-
-    elseif action == :BeA
-        left = Bv
-    elseif action == :eBA
-        right = Bv
-    end
-end
-
-function perform_action!(ptl, g, action, action_Ps, obs)
+"A shorter & slower version of perform_action"
+function perform_action_short!(ptl, g, action, action_Ps, obs)
     stack = ptl.stack
     if action == :sft
         # new observation Z
@@ -351,138 +365,355 @@ function perform_action!(ptl, g, action, action_Ps, obs)
         Ps = pushval!(ptl, action_Ps)
         Pv = getval(ptl, Ps)
         Pt = g.type[Pv]
-        # get stack top
+        # get stack tops
         A = head(stack)
         Av = getval(ptl, A.sym)
-        # get second stack top
-        if length(stack > 1)
-            B = head(tail(stack))
-            Bv = getval(ptl, Bs)
+        B = length(stack) > 1 ? head(tail(stack)) : nothing
+        Bv = length(stack) > 1 ? getval(ptl, B.sym) : 0
+        C = length(stack) > 2 ? head(tail(tail(stack))) : nothing
+        # sample children
+        if action in (:Ae, :Aee, :BeA)
+            rightv = samplesym(g, h, action, Pv, Av, Bv)
+        elseif action in (:eA, :eAe, :eBA)
+            leftv = samplesym(g, h, action, Pv, Av, Bv)
+        elseif action == :eeA
+            leftv, rightv = samplesym(g, h, action, Pv, Av, Bv)
         end
-        if action == :A # one child (left)
-            left = A
-            P = addroot!(ptl, g, 
-                sym=Ps, 
-                in=left.in, 
-                out=left.out, 
-                left=left)
-            stack_new = cons(P, tail(stack))
-        elseif action in (:Ae, :eA, :BA) # two children (left, right)
-            # prepare children
-            if action == :Ae
-                v = samplesym(g, h, action, Pv, Av)
-                left = A
-                right = addleaf!(ptl, g, 
-                    sym=pushval(ptl, v), 
-                    in=Pt in (Ll, Lr) ? left.out : left.in, 
+        # set children
+        left = action in (:A, :Ae, :Aee) ? A :
+               action in (:BA, :BAe) ? B :
+               action in (:CBA) ? C : 
+               addleaf!(ptl, g, 
+                   sym=pushval(ptl, leftv), 
+                   in=pushval(ptl),
+                   out=pushval!(ptl))
+        right = action in (:A) ? nothing :
+                action in (:eA, :BA, :eAe, :BAe) ? A :
+                action in (:eBA, :CBA) ? B : 
+                addleaf!(ptl, g, 
+                    sym=pushval(ptl, rightv), 
+                    in=pushval(ptl),
                     out=pushval!(ptl))
-            elseif action == :eA
-                v = samplesym(g, h, action, Pv, Av)
+        dynam = action in (:A, :Ae, :eA, :BA) ? nothing :
+                action in (:eeA, :BeA, :eBA, :CBA) ? A : 
+                addleaf!(ptl, g, 
+                    sym=pushval(ptl), 
+                    in=pushval(ptl),
+                    out=pushval!(ptl))
+        # Merge values
+        if right !== nothing
+            mergeval!(ptl, 
+                Pt in (Ll, Lr, Llr, Lrl) ? left.out : left.in, 
+                right.in) || warning("Merge fail")
+        end
+        if dynam !== nothing
+            mergeval!(ptl, 
+                Pt in (Llr, Plr) ? dynam.sym : dynam.in,
+                left.out) || warning("Merge fail")
+            mergeval!(ptl, 
+                Pt in (Llr, Plr) ? dynam.in : dynam.sym,
+                right.out) || warning("Merge fail")
+        end
+        # add root
+        P = addroot!(ptl, g, 
+            sym=Ps, 
+            in=left.in, 
+            out=Pt in (U, Ll, Pl) ? left.out :
+                Pt in (Lr, Pr) ? right.out : 
+                dynam.out, 
+            left=left, right=right, dynam=dynam)
+        stack_new = cons(P, action == :CBA ? tail(tail(tail(stack))) : 
+                            action in (:BA, :eBA, :Bea) ? tail(tail(stack)) :
+                            tail(stack))
+    end
+    return BUParticle(ptl.w, stack_new, ptl.values, ptl.dset, ptl.factors, ptl)
+end
+
+function eval_state(ptl::BUParticle, g, h, state)
+    isnothing(state) && return nothing, nothing, nothing
+    ret = [getval(ptl, state.sym)]
+    for x in (state.in, state.out)
+        rx = find_root(ptl.dset, x)
+        val = ptl.values[rx]
+        factors = ptl.factors[rx]
+        if val == 0
+            push!(ret, onehot(g.n_id, val))
+        else
+            push!(ret, reduce((.*), eval.(factors.f)))
+    end
+    return tuple(ret...)
+end
+
+function action_weight(ptl, g, h)
+    # get the top symbols
+    stack = ptl.stack
+    A = head(stack)
+    # eval returns a vector
+    As, Ai, Ao, Aoi = eval_state(ptl, g, h, A)
+    B = length(stack) > 1 ? head(tail(stack)) : nothing
+    Bs, Bi, Bo, Boi = eval_state(ptl, g, h, B)
+    C = length(stack) > 2 ? head(tail(tail(stack))) : nothing
+    Cs, Ci, Co, Coi = eval_state(ptl, g, h, C)
+    w_sft = 0
+    # case A
+    w_UA = h.p[:UA][:, As]' * Ai
+    # case Ae
+    w_LlAe = sum(h.p[:LlAe][:, :, As] .* Aoi)
+    w_LrAe = sum(h.p[:LrAe][:, :, As] .* Aoi)
+    w_PlAe = h.p[:PlAe][:, As]' * Ai
+    w_PrAe = h.p[:PrAe][:, As]' * Ai
+    # case Az
+    w_sft += sum(h.p[:LlAz][:, :, As] .* Aoi)
+    w_sft += sum(h.p[:LrAz][:, :, As] .* Aoi)
+    w_sft += h.p[:PlAz][:, As]' * Ai
+    w_sft += h.p[:PrAz][:, As]' * Ai
+    # case eA
+    w_LleA = h.p[:LleA][:, As]' * Ai
+    w_LreA = h.p[:LreA][:, As]' * Ai
+    w_PleA = h.p[:PleA][:, As]' * Ai
+    w_PreA = h.p[:PreA][:, As]' * Ai
+    # case BA
+    w_LlBA = Ai' * Boi * h.p[:LlBA][:, As, Bs]
+    w_LrBA = Ai' * Boi * h.p[:LrBA][:, As, Bs]
+    w_PlBA = h.p[:PlBA][:, As, Bs]' * (Bi .* Ai)
+    w_PrBA = h.p[:PrBA][:, As, Bs]' * (Bi .* Ai)
+    # case Aee
+    w_LlrAee = sum(h.p[:LlrAee][:, :, As] .* Aoi)
+    w_LrlAee = sum(h.p[:LrlAee][:, :, As] .* Aoi)
+    w_PlrAee = sum(h.p[:PlrAee][:, :, As] .* Aoi)
+    w_PrlAee = sum(h.p[:PrlAee][:, :, As] .* Aoi)
+    # case Aez
+    w_sft += sum(h.p[:LlrAez][:, :, As] .* Aoi)
+    w_sft += sum(h.p[:LrlAez][:, :, As] .* Aoi)
+    w_sft += sum(h.p[:PlrAez][:, :, As] .* Aoi)
+    w_sft += sum(h.p[:PrlAez][:, :, As] .* Aoi)
+    # case Azx
+    w_sft += sum(h.p[:LlrAzx][:, :, As] .* Aoi)
+    w_sft += sum(h.p[:LrlAzx][:, :, As] .* Aoi)
+    w_sft += sum(h.p[:PlrAzx][:, :, As] .* Aoi)
+    w_sft += sum(h.p[:PrlAzx][:, :, As] .* Aoi)
+    # case eAe
+    w_LlreAe = sum(h.p[:LlreAe][:, :, As] .* Aoi)
+    w_LrleAe = sum(h.p[:LrleAe][:, :, As] .* Aoi)
+    w_PlreAe = sum(h.p[:PlreAe][:, :, As] .* Aoi)
+    w_PrleAe = sum(h.p[:PrleAe][:, :, As] .* Aoi)
+    # case eAz
+    w_sft += sum(h.p[:LlreAz][:, :, As] .* Aoi)
+    w_sft += sum(h.p[:LrleAz][:, :, As] .* Aoi)
+    w_sft += sum(h.p[:PlreAz][:, :, As] .* Aoi)
+    w_sft += sum(h.p[:PrleAz][:, :, As] .* Aoi)
+    # case BAe
+    # w_LlrBAe = sum(Aoi .* h.e, dims=1) * (Boi * h.p[:LlrBA][:, As, Bs])
+    # w_LrlBAe = sum(Aoi .* h.e', dims=1) * (Boi * h.p[:LlrBA][:, As, Bs])
+    # w_PlrBAe = (Aoi * h.p[:PlrBA][:, As, Bs])' * h.e * (Boi * h.p[:PlrBA][:, As, Bs])
+    # w_PrlBAe = (Aoi * h.p[:PrlBA][:, As, Bs])' * h.e' * (Boi * h.p[:PrlBA][:, As, Bs])
+    # case BAz
+    # w_sft += sum(Aoi .* h.z, dims=1) * (Boi * h.p[:LlrBA][:, As, Bs])
+    # w_sft += sum(Aoi .* h.z', dims=1) * (Boi * h.p[:LlrBA][:, As, Bs])
+    # w_sft += (Aoi * h.p[:PlrBA][:, As, Bs])' * h.z * (Boi * h.p[:PlrBA][:, As, Bs])
+    # w_sft += (Aoi * h.p[:PrlBA][:, As, Bs])' * h.z' * (Boi * h.p[:PrlBA][:, As, Bs])
+    # case eeA
+    w_LlreeA = h.p[:LlreeA][:, As]' * Ai
+    w_LrleeA = h.p[:LrleeA][:, As]' * Ai
+    w_PlreeA = h.p[:PlreeA][:, As]' * Ai
+    w_PrleeA = h.p[:PrleeA][:, As]' * Ai
+    # case BeA
+    # w_LlrBeA = Boi[As, :]' * h.p[:LlrBA][:, :, Bs] * (h.e[As, :] .* (Ai' * h.f[As, :, :]))
+    # w_LrlBeA = sum(Ai' * (Boi * h.p[:LrlBA][:, :, Bs] .* h.e .* h.f[As, :, :])) # warning: O(N^3)
+    # w_PlrBeA = sum(Boi[As, :]' * (h.p[:PlrBA][:, :, Bs] .* h.e .* sum(Ai .* h.f, dims=1))) # O(N^3)
+    # w_PrlBeA = sum(Ai' * Boi * (h.p[:PrlBA][:, :, Bs] .* h.e .* h.f[As, :, :])) 
+    w_LlrBeA = Ai' * h.p[LlrBeA][:, :, As, Bs] * Boi[As, :] 
+    w_LrlBeA = Ai' * (h.p[LrlBeA][:, :, As, Bs] .* Boi)
+    w_PlrBeA = Ai' * h.p[PlrBeA][:, :, As, Bs] * Boi[As, :]
+    w_PrlBeA = Ai' * Boi * h.p[PrlBeA][:, As, Bs]
+    # case eBA
+    # w_LlreBA = sum(h.p[:LlrBA][:, Bs, :] .* h.e .* h.f[As, :, :]) * (Ai' * Boi[:, As])
+    # w_LrleBA = sum(h.p[:LrlBA][:, Bs, :] .* h.e .* sum(Ai .* Boi[As, :] .* h.f, dims=1)) # O(N^3)
+    # w_PlreBA = sum(Ai' * Boi * (h.p[:PlrBA][:, Bs, :] .* h.e .* h.f[As, :, :]))
+    # w_PrleBA = sum(Boi[As, :]' * (h.p[:LrlBA][:, Bs, :] .* h.e .* sum(Ai .* h.f, dims=1))) # O(N^3)
+    w_LlrBeA = h.p[LlrBeA][As, Bs] * (Ai' * Boi[:, As])
+    w_LrlBeA = h.p[LrlBeA][:, As, Bs]' * (Ai .* Boi[As, :])
+    w_PlrBeA = Ai' * Boi * h.p[PlrBeA][:, As, Bs]
+    w_PrlBeA = Ai' * h.p[PrlBeA][:, :, As, Bs] * Boi[As, :]
+    # case CBA
+    w_LlrCBA = (Ai' * Boi[:, As]) * Coi[A, :]' * h.d * h.p2[Bs, Cs, :]
+    w_LrlCBA = (Ai .* Boi[As, :])' * Coi * h.d * h.p2[Bs, Cs, :]
+    w_PlrCBA = ((Ai' * Boi) .* Coi[A, :])' * h.d * h.p2[Bs, Cs, :]
+    w_PrlCBA = ((Ai' * Coi) .* Boi[A, :])' * h.d * h.p2[Bs, Cs, :]
+end
+
+function sample_action(ptl, g, h, is_last_step)
+    # evaluate weights for action sampling
+    weight = action_weight(ptl, g, h)
+    # prevent shift in the last step
+    if is_last_step weight[1] = 0 end
+    distr = normalize(weight)
+    action_idx, prob = sample(distr)
+    return decode_action(action_idx, g.n_cm), prob
+end
+
+function sample_io(ptl, g, h)
+    
+end
+
+function sample_children(ptl, g, h, action)
+    # may call sample_io for certain cases
+end
+
+function sample_parent(ptl, g, h, action, children)
+    
+end
+
+function shift(ptl, g, obs)
+    stack = ptl.stack
+    # new observation Z
+    Zs = pushval!(ptl, obs)
+    Zi = pushval!(ptl)
+    Zo = Zi
+    Z = BUState(Zs, Zi, Zo)
+    # push Z
+    stack_new = cons(Z, stack)
+    w_new = ptl.w
+    return BUParticle(w_new, stack_new, ptl.values, ptl.dset, ptl.factors, ptl)
+end
+
+function reduce(ptl, g, action, children, parent)
+    stack = ptl.stack
+    # new root symbol
+    Ps = pushval!(ptl, parent)
+    Pv = getval(ptl, Ps)
+    Pt = g.type[Pv]
+    # get stack top
+    A = head(stack)
+    Av = getval(ptl, A.sym)
+    # get second stack top
+    if length(stack) > 1
+        B = head(tail(stack))
+        Bv = getval(ptl, B.sym)
+    end
+    if action == :A # one child (left)
+        left = A
+        P = addroot!(ptl, g, 
+            sym=Ps, 
+            in=left.in, 
+            out=left.out, 
+            left=left)
+        stack_new = cons(P, tail(stack))
+    elseif action in (:Ae, :eA, :BA) # two children (left, right)
+        # prepare children
+        if action == :Ae
+            v = children[1]
+            left = A
+            right = addleaf!(ptl, g, 
+                sym=pushval(ptl, v), 
+                in=Pt in (Ll, Lr) ? left.out : left.in, 
+                out=pushval!(ptl))
+        elseif action == :eA
+            v = children[1]
+            right = A
+            left = addleaf!(ptl, g, 
+                sym=pushval!(ptl, v), 
+                in=Pt in (Ll, Lr) ? pushval!(ptl) : right.in,
+                out=Pt in (Ll, Lr) ? right.in : pushval!(ptl))
+        elseif action == :BA
+            left = B
+            right = A
+            mergeval!(ptl, 
+                Pt in (Ll, Lr) ? left.out : left.in, 
+                right.in) || warning("Merge fail")
+        end
+        # add parent
+        P = addroot!(ptl, g, 
+            sym=Ps, 
+            in=left.in, 
+            out=Pt in (Ll, Pl) ? left.out : right.out, 
+            left=left, right=right)
+        stack_new = cons(P, action == :BA ? tail(tail(stack)) : 
+                            tail(stack))
+    else # three children (left, right, dynam)
+        if action in (:Aee, :eAe, :BAe)
+            if action == :Aee
+                v = children[1]
+                left = A
+                right = addleaf!(ptl, g,
+                    sym=pushval!(ptl, v),
+                    in=Pt in (Llr, Lrl) ? left.out : left.in,
+                    out=pushval!(ptl))
+            elseif action == :eAe
+                v = children[1]
                 right = A
-                left = addleaf!(ptl, g, 
-                    sym=pushval!(ptl, v), 
-                    in=Pt in (Ll, Lr) ? pushval!(ptl) : right.in,
-                    out=Pt in (Ll, Lr) ? right.in : pushval!(ptl))
-            elseif action == :BA
+                left = addleaf!(ptl, g,
+                    sym=pushval!(ptl, v),
+                    in=Pt in (Llr, Lrl) ? pushval!(ptl) : right.in,
+                    out=Pt in (Llr, Lrl) ? right.in : pushval!(ptl))
+            else # action == :BAe
                 left = B
                 right = A
                 mergeval!(ptl, 
-                    Pt in (Ll, Lr) ? left.out : left.in, 
+                    Pt in (Llr, Lrl) ? left.out : left.in, 
                     right.in) || warning("Merge fail")
             end
-            # add parent
-            P = addroot!(ptl, g, 
-                sym=Ps, 
-                in=left.in, 
-                out=Pt in (Ll, Pl) ? left.out : right.out, 
-                left=left, right=right)
-            stack_new = cons(P, action == :BA ? tail(tail(stack)) : 
-                                tail(stack))
-        else # three children (left, right, dynam)
-            if action in (:Aee, :eAe, :BAe)
-                if action == :Aee
-                    v = samplesym(g, h, action, Pv, Av)
-                    left = A
-                    right = addleaf!(ptl, g,
-                        sym=pushval!(ptl, v),
-                        in=Pt in (Llr, Lrl) ? left.out : left.in,
-                        out=pushval!(ptl))
-                elseif action == :eAe
-                    v = samplesym(g, h, action, Pv, Av)
-                    right = A
-                    left = addleaf!(ptl, g,
-                        sym=pushval!(ptl, v),
-                        in=Pt in (Llr, Lrl) ? pushval!(ptl) : right.in,
-                        out=Pt in (Llr, Lrl) ? right.in : pushval!(ptl))
-                else # action == :BAe
-                    left = B
-                    right = A
-                    mergeval!(ptl, 
-                        Pt in (Llr, Lrl) ? left.out : left.in, 
-                        right.in) || warning("Merge fail")
-                end
-                dynam = addleaf!(ptl, g,
-                    sym=Pt in (Llr, Plr) ? left.out : right.out,
-                    in=Pt in (Llr, Plr) ? right.out : left.out,
-                    out=pushval!(ptl))
-            else
-                if action == :eeA
-                    v1, v2 = samplesym(g, h, action, Pv, Av)
-                    dynam = A
-                    left = addleaf!(ptl, g,
-                        sym=pushval!(ptl, v1),
-                        in=pushval!(ptl),
-                        out=Pt in (Llr, Plr) ? dynam.sym : dynam.in)
-                    right = addleaf!(ptl, g,
-                        sym=pushval!(ptl, v2),
-                        in=Pt in (Llr, Lrl) ? left.out : left.in,
-                        out=Pt in (Llr, Plr) ? dynam.in : dynam.sym)
-                elseif action == :BeA
-                    v = samplesym(g, h, action, Pv, Av, Bv)
-                    left = B
-                    dynam = A
-                    mergeval!(ptl, 
-                        Pt in (Llr, Plr) ? dynam.sym : dynam.in,
-                        left.out) || warning("Merge fail")
-                    right = addleaf!(ptl, g,
-                        sym=pushval!(ptl, v),
-                        in=Pt in (Llr, Lrl) ? left.out : left.in,
-                        out=Pt in (Llr, Plr) ? dynam.in : dynam.sym)
-                elseif action == :eBA
-                    v = samplesym(g, h, action, Pv, Av, Bv)
-                    right = B
-                    dynam = A
-                    mergeval!(ptl, 
-                        Pt in (Llr, Plr) ? dynam.in : dynam.sym,
-                        right.out) || warning("Merge fail")
-                    left = addleaf!(ptl, g,
-                        sym=pushval!(ptl, v),
-                        in=Pt in (Llr, Lrl) ? pushval!(ptl) : right.in,
-                        out=Pt in (Llr, Plr) ? dynam.sym : dynam.in)
-                else # action == :CBA
-                    left = head(tail(tail(stack)))
-                    right = B
-                    dynam = A
-                    mergeval!(ptl, 
-                        Pt in (Llr, Lrl) ? left.out : left.in, 
-                        right.in) || warning("Merge fail")
-                    mergeval!(ptl, 
-                        Pt in (Llr, Plr) ? dynam.sym : dynam.in,
-                        left.out) || warning("Merge fail")
-                    mergeval!(ptl, 
-                        Pt in (Llr, Plr) ? dynam.in : dynam.sym,
-                        right.out) || warning("Merge fail")
-                end
+            dynam = addleaf!(ptl, g,
+                sym=Pt in (Llr, Plr) ? left.out : right.out,
+                in=Pt in (Llr, Plr) ? right.out : left.out,
+                out=pushval!(ptl))
+        else
+            if action == :eeA
+                v1, v2 = children[1], children[2]
+                dynam = A
+                left = addleaf!(ptl, g,
+                    sym=pushval!(ptl, v1),
+                    in=pushval!(ptl),
+                    out=Pt in (Llr, Plr) ? dynam.sym : dynam.in)
+                right = addleaf!(ptl, g,
+                    sym=pushval!(ptl, v2),
+                    in=Pt in (Llr, Lrl) ? left.out : left.in,
+                    out=Pt in (Llr, Plr) ? dynam.in : dynam.sym)
+            elseif action == :BeA
+                v = children[1]
+                left = B
+                dynam = A
+                mergeval!(ptl, 
+                    Pt in (Llr, Plr) ? dynam.sym : dynam.in,
+                    left.out) || warning("Merge fail")
+                right = addleaf!(ptl, g,
+                    sym=pushval!(ptl, v),
+                    in=Pt in (Llr, Lrl) ? left.out : left.in,
+                    out=Pt in (Llr, Plr) ? dynam.in : dynam.sym)
+            elseif action == :eBA
+                v = children[1]
+                right = B
+                dynam = A
+                mergeval!(ptl, 
+                    Pt in (Llr, Plr) ? dynam.in : dynam.sym,
+                    right.out) || warning("Merge fail")
+                left = addleaf!(ptl, g,
+                    sym=pushval!(ptl, v),
+                    in=Pt in (Llr, Lrl) ? pushval!(ptl) : right.in,
+                    out=Pt in (Llr, Plr) ? dynam.sym : dynam.in)
+            else # action == :CBA
+                left = head(tail(tail(stack)))
+                right = B
+                dynam = A
+                mergeval!(ptl, 
+                    Pt in (Llr, Lrl) ? left.out : left.in, 
+                    right.in) || warning("Merge fail")
+                mergeval!(ptl, 
+                    Pt in (Llr, Plr) ? dynam.sym : dynam.in,
+                    left.out) || warning("Merge fail")
+                mergeval!(ptl, 
+                    Pt in (Llr, Plr) ? dynam.in : dynam.sym,
+                    right.out) || warning("Merge fail")
             end
-            P = addroot!(ptl, g, 
-                sym=Ps,
-                in=left.in, 
-                out=dynam.out, 
-                left=left, right=right, dynam=dynam)
-            stack_new = cons(P, action == :CBA ? tail(tail(tail(stack))) : 
-                                action in (eBA, Bea) ? tail(tail(stack)) :
-                                tail(stack))
         end
+        P = addroot!(ptl, g, 
+            sym=Ps,
+            in=left.in, 
+            out=dynam.out, 
+            left=left, right=right, dynam=dynam)
+        stack_new = cons(P, action == :CBA ? tail(tail(tail(stack))) : 
+                            action in (:eBA, :BeA) ? tail(tail(stack)) :
+                            tail(stack))
     end
     return BUParticle(ptl.w, stack_new, ptl.values, ptl.dset, ptl.factors, ptl)
 end
@@ -490,49 +721,40 @@ end
 "Progress a particle forward to the next observation"
 function forward(ptl::BUParticle, obs::Int, g::GrammarEx, h::BUHeuristics, max_iter::Int)
     iter = 1
+    is_last_step = obs == 0
     while !isa(ptl.stack, Nil) # stack not empty
         if iter > max_iter
             debugln("Too many iterations between observation")
-            return BUParticle(0., ptl.stack, ptl.values, ptl)
+            return BUParticle(0., ptl.stack, ptl.values, ptl.dset, ptl.factors, ptl)
         else
             iter += 1
         end
-        # evaluate weights for action sampling
-        weight = vcat(action_weights(ptl, h, g)...)
-        distr = normalize(weight)
-        tmp, _ = sample(distr)
-        action, action_Ps = decode_action(tmp, g.n_cm)
-        ptl = perform_action(ptl, g, action, action_Ps, obs)
+        action, prob_act = sample_action(ptl, g, h, is_last_step)
+        if action == :sft
+            ptl = shift(ptl, g, obs)
+            break
+        else
+            children, prob_chl = sample_children(ptl, g, h, action)
+            parent, prob_par = sample_parent(ptl, g, h, action, children)
+            ptl = reduce(ptl, g, action, children, parent)
+            if is_last_step && length(ptl.stack) == 1 &&
+                getval(ptl, head(ptl.stack).sym) == 1
+                # TODO: perform TD expansions and update heuristics
+                break
+            end
+        end
     end
-    return ptl
-end
-
-"Finish the particle simulation and update weight"
-function finalize(ptl, g, h, max_iter)
-    w = ptl.w
-    # check stack size
-    if length(ptl.stack) != 1
-        w = 0
-    # check root symbol (should be 1)
-    elseif getval(ptl, head(ptl.stack).sym) != 1
-        w = 0
-    # perform TD expansions and update heuristics
-    else
-        # TODO
-    end
-    ptl = BUParticle(w, ptl.stack, ptl.values, ptl.dset, ptl.factors, ptl)
     return ptl
 end
 
 "Prepare function and rule probabilities, with training/testing mode"
-function parse_prepare!(g, training)
+function parse_prepare!(g::GrammarEx, h::BUHeuristics, training::Bool)
     w_extra = training ? g.alpha : 0.
-    p_fn = normalize(g.w_fn .+ w_extra, dims=1)
-    p_cn = normalize(g.w_cn .+ w_extra, dims=1)
-    p_l = normalize(sum(g.w_cm2, dims=1)[1, :, :] .+ g.w_cm1 .+ w_extra, dims=1)
-    p_r = normalize(sum(g.w_cm2, dims=2)[:, 1, :] .+ w_extra, dims=1)
-    p_cm2 = normalize(g.w_cm2 .+ w_extra, dims=(1,2))
-    g.h = (; p_fn, p_cn, p_l, p_r, p_cm2)
+    h.p_fn = normalize(g.w_fn .+ w_extra, dims=1)
+    h.p_cn = normalize(g.w_cn .+ w_extra, dims=1)
+    h.p_l = normalize(sum(g.w_cm2, dims=1)[1, :, :] .+ g.w_cm1 .+ w_extra, dims=1)
+    h.p_r = normalize(sum(g.w_cm2, dims=2)[:, 1, :] .+ w_extra, dims=1)
+    h.p_cm2 = normalize(g.w_cm2 .+ w_extra, dims=(1,2))
 end
 
 function get_obs(g, char)
@@ -540,10 +762,10 @@ function get_obs(g, char)
 end
 
 function buparticle_init(obs, n_particle)
-    values = [obs, 0, 0]
-    dset = IntDisjointSets(3)
-    stack = list(BUState(1, 2, 3))
-    factors = [Factors(), Factors(), Factors()]
+    values = [obs, 0]
+    dset = IntDisjointSets(2)
+    stack = list(BUState(1, 2, 2))
+    factors = [Factors(), Factors()]
     ptl = BUParticle(1., stack, values, dset, factors, nothing)
     particles = Vector{BUParticle}()
     for i in 1:n_particle
@@ -556,13 +778,6 @@ function forward_all!(particles, args...)
     for (i, ptl) in enumerate(particles)
         debugln("Simulating particle $i")
         particles[i] = forward(ptl, args...)
-    end
-end
-
-function finalize_all!(particles, args...)
-    for (i, ptl) in enumerate(particles)
-        debugln("Finishing particle $i")
-        particles[i] = finalize(ptl, args...)
     end
 end
 
@@ -590,8 +805,8 @@ function is_all_fail(particles)
     return total_weight <= 0.
 end
 
-function parse_bupf(str::String, g::GrammarEx, h::BUHeuristics, n_particle::Int=4, max_iter::Int=100, training::Bool=false)
-    parse_prepare!(g, trailing_ones)
+function parse_bupf(str::String, g::GrammarEx, h::BUHeuristics, n_particle::Int=4, max_iter::Int=10, training::Bool=false)
+    parse_prepare!(g, h, training)
     # init
     obs_first = get_obs(g, str[1])
     particles = buparticle_init(obs_first, n_particle)
@@ -607,13 +822,23 @@ function parse_bupf(str::String, g::GrammarEx, h::BUHeuristics, n_particle::Int=
             return Vector{BUParticle}(), NaN
         end
         # TODO: fix this for non-binary weights
-        logprob += log(total_weight / n_particle)
+        # logprob += log(total_weight / n_particle)
         # resample is effective sample size too small
         if effective_size(particles) <= n_particle / 2
             resample!(particles, n_particle)
         end
     end
     # finalize the simulation after the last observation
-    finalize_all!(particles, g, h, max_iter)
+    forward_all!(particles, 0, g, h, max_iter)
+    # TODO: increase diversity by backward simulation
     return particles, logprob
 end
+
+g = test_grammar1()
+h = learn_from_grammar(g, 10000)
+data = "xzx"
+# ps, _ = parse_tdpf(data, g, 10)
+# tr = sample_tdpf(ps)
+# tr isa Tree && print_tree(tr, g)
+ps, _ = parse_bupf(data, g, h, 1)
+println("Finish")

@@ -10,7 +10,7 @@ function debug(args...)
     # print(args...)
 end
 function debugln(args...)
-    # println(args...)
+    println(args...)
 end
 
 function relative_error(target, estimate)

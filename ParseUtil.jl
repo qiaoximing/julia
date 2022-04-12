@@ -8,8 +8,8 @@ end
 
 struct BUState
     sym::Int
-    input::Int
-    output::Int
+    in::Int
+    out::Int
 end
 
 "parse tree"
