@@ -15,7 +15,11 @@ mutable struct BUHeuristics
     out::Matrix{Float32} # output prob per symbol
     oi::Array{Float32, 3} # output prob per symbol-input
     io::Array{Float32, 3} # input prob per symbol-output
+    w::Dict
+    a::Dict
     p::Dict
+    c1::Dict
+    c2::Dict
 end
 BUHeuristics(decay, n) = BUHeuristics(decay, 1, 
     ones(Float32, n), 
@@ -24,8 +28,29 @@ BUHeuristics(decay, n) = BUHeuristics(decay, 1,
     ones(Float32, n, n), 
     ones(Float32, n, n, n), 
     ones(Float32, n, n, n), 
+    Dict(),
+    Dict(),
+    Dict(),
+    Dict(),
     Dict()
     )
+function init!(h::BUHeuristics, g)
+    names1 = (:Ae, :Az, :eA, :BA)
+    names2 = (:Aee, :Aez, :Aze, :Azz, 
+              :eAe, :eAz, :BAe, :BAz, 
+              :eeA, :BeA, :eBA, :CBA)
+    # dimension organization:
+    # unknown children from right to left
+    # then parent 
+    # then the known children from right to left
+    h.w[:A] = ones(Float32, g.n_id, g.n_id)
+    for name in names1
+        h.w[name] = ones(Float32, g.n_id, g.n_id, g.n_id)
+    end
+    for name in names2
+        h.w[name] = ones(Float32, g.n_id, g.n_id, g.n_id, g.n_id)
+    end
+end
 
 function count_sym!(h::BUHeuristics, sym, w=1)
     h.sym .*= 1 - h.decay * w
@@ -58,93 +83,91 @@ function count_nul!(h::BUHeuristics, isnul, sym, w=1)
     end
 end
 
-function compile(g, h)
-    w_extra = 0
-    fn = normalize(g.w_fn .+ w_extra, dims=1)
-    cn = normalize(g.w_cn .+ w_extra, dims=1)
-    pl = normalize(sum(g.w_cm2, dims=1)[1, :, :] .+ g.w_cm1 .+ w_extra, dims=1)
-    pr = normalize(sum(g.w_cm2, dims=2)[:, 1, :] .+ w_extra, dims=1)
-    p2 = normalize(g.w_cm2 .+ w_extra, dims=(1,2))
-    d = (h.tot * h.in .* h.sym')[:, 1:g.n_cm]
-    e = h.nul 
-    z = 1 .- h.nul
-    f = h.nul_oi # output distribution when not observed
-    u, ll, lr, pl, pr, llr, lrl, plr, prl = map(
-        T -> Vector{Float32}([g.type[i] == T for i in 1:g.n_cm]),
-        (U, Ll, Lr, Pl, Pr, Llr, Lrl, Plr, Prl))
-    # case A
-    @einsum UA[i, l] := d[i, p] * pl[l, p] * u[p]
-    # case Ae
-    @einsum LlAe[o, i, l] := d[i, p] * p2[r, l, p] * e[o, r] * ll[p]
-    @einsum LrAe[o, i, l] := d[i, p] * p2[r, l, p] * e[o, r] * lr[p]
-    @einsum PlAe[i, l] := d[i, p] * p2[r, l, p] * e[i, r] * pl[p]
-    @einsum PrAe[i, l] := d[i, p] * p2[r, l, p] * e[i, r] * pr[p]
-    # case Az
-    @einsum LlAz[o, i, l] := d[i, p] * p2[r, l, p] * z[o, r] * ll[p]
-    @einsum LrAz[o, i, l] := d[i, p] * p2[r, l, p] * z[o, r] * lr[p]
-    @einsum PlAz[i, l] := d[i, p] * p2[r, l, p] * z[i, r] * pl[p]
-    @einsum PrAz[i, l] := d[i, p] * p2[r, l, p] * z[i, r] * pr[p]
-    # case eA
-    @einsum LleA[i, r] := d[x, p] * p2[r, l, p] * f[i, x, l] * e[x, l] * ll[p]
-    @einsum LreA[i, r] := d[x, p] * p2[r, l, p] * f[i, x, l] * e[x, l] * lr[p]
-    @einsum PleA[i, r] := d[i, p] * p2[r, l, p] * e[i, l] * pl[p]
-    @einsum PreA[i, r] := d[i, p] * p2[r, l, p] * e[i, l] * pr[p]
-    # case BA
-    @einsum LlBA[i, r, l] := d[i, p] * p2[r, l, p] * ll[p]
-    @einsum LrBA[i, r, l] := d[i, p] * p2[r, l, p] * lr[p]
-    @einsum PlBA[i, r, l] := d[i, p] * p2[r, l, p] * pl[p]
-    @einsum PrBA[i, r, l] := d[i, p] * p2[r, l, p] * pr[p]
-    # case Aee
-    @einsum LlrAee[o, i, l] := d[i, p] * p2[r, l, p] * f[x, o, r] * e[o, r] * e[x, o] * llr[p]
-    @einsum LrlAee[o, i, l] := d[i, p] * p2[r, l, p] * f[x, o, r] * e[o, r] * e[o, x] * lrl[p]
-    @einsum PlrAee[o, i, l] := d[i, p] * p2[r, l, p] * f[x, i, r] * e[i, r] * e[x, o] * plr[p]
-    @einsum PrlAee[o, i, l] := d[i, p] * p2[r, l, p] * f[x, i, r] * e[i, r] * e[o, x] * prl[p]
-    # case Aez
-    @einsum LlrAez[o, i, l] := d[i, p] * p2[r, l, p] * f[x, o, r] * e[o, r] * z[x, o] * llr[p]
-    @einsum LrlAez[o, i, l] := d[i, p] * p2[r, l, p] * f[x, o, r] * e[o, r] * z[o, x] * lrl[p]
-    @einsum PlrAez[o, i, l] := d[i, p] * p2[r, l, p] * f[x, i, r] * e[i, r] * z[x, o] * plr[p]
-    @einsum PrlAez[o, i, l] := d[i, p] * p2[r, l, p] * f[x, i, r] * e[i, r] * z[o, x] * prl[p]
-    # case Azx (including Aze and Azz)
-    @einsum LlrAzx[o, i, l] := d[i, p] * p2[r, l, p] * z[o, r] * llr[p]
-    @einsum LrlAzx[o, i, l] := d[i, p] * p2[r, l, p] * z[o, r] * lrl[p]
-    @einsum PlrAzx[o, i, l] := d[i, p] * p2[r, l, p] * z[i, r] * plr[p]
-    @einsum PrlAzx[o, i, l] := d[i, p] * p2[r, l, p] * z[i, r] * prl[p]
-    # case eAe
-    @einsum LlreAe[o, i, r] := d[x, p] * p2[r, l, p] * f[i, x, l] * e[x, l] * e[o, i] * llr[p]
-    @einsum LrleAe[o, i, r] := d[x, p] * p2[r, l, p] * f[i, x, l] * e[x, l] * e[i, o] * lrl[p]
-    @einsum PlreAe[o, i, r] := d[i, p] * p2[r, l, p] * f[x, i, l] * e[i, l] * e[o, x] * prl[p]
-    @einsum PrleAe[o, i, r] := d[i, p] * p2[r, l, p] * f[x, i, l] * e[i, l] * e[x, o] * prl[p]
-    # case eAz
-    @einsum LlreAz[o, i, r] := d[x, p] * p2[r, l, p] * f[i, x, l] * e[x, l] * z[o, i] * llr[p]
-    @einsum LrleAz[o, i, r] := d[x, p] * p2[r, l, p] * f[i, x, l] * e[x, l] * z[i, o] * lrl[p]
-    @einsum PlreAz[o, i, r] := d[i, p] * p2[r, l, p] * f[x, i, l] * e[i, l] * z[o, x] * prl[p]
-    @einsum PrleAz[o, i, r] := d[i, p] * p2[r, l, p] * f[x, i, l] * e[i, l] * z[x, o] * prl[p]
-    # case BAx (including BAe and BAz)
-    # @einsum LlrBA[i, r, l] := d[i, p] * p2[r, l, p] * llr[p]
-    # @einsum LrlBA[i, r, l] := d[i, p] * p2[r, l, p] * lrl[p]
-    # @einsum PlrBA[i, r, l] := d[i, p] * p2[r, l, p] * prl[p]
-    # @einsum PrlBA[i, r, l] := d[i, p] * p2[r, l, p] * prl[p]
-    @einsum LlrBAe[r, l] := d[x, p] * p2[r, l, p] *  * llr[p]
-    # case eeA
-    @einsum LlreeA[i, a] := d[x, p] * p2[r, l, p] * f[a, x, l] * e[x, l] * f[i, a, r] * e[a, r] * llr[p]
-    @einsum LrleeA[i, a] := d[x, p] * p2[r, l, p] * f[i, x, l] * e[x, l] * f[a, i, r] * e[i, r] * lrl[p]
-    @einsum PlreeA[i, a] := d[x, p] * p2[r, l, p] * f[a, x, l] * e[x, l] * f[i, x, r] * e[x, r] * plr[p]
-    @einsum PrleeA[i, a] := d[x, p] * p2[r, l, p] * f[i, x, l] * e[x, l] * f[a, x, r] * e[x, r] * prl[p]
-    # case BeA 
-    @einsum LlrBeA[i, x, a, l] := d[x, p] * p2[r, l, p] * f[i, a, r] * e[a, r] * llr[p]
-    @einsum LrlBeA[i, x, a, l] := d[x, p] * p2[r, l, p] * f[a, i, r] * e[i, r] * lrl[p]
-    @einsum PlrBeA[i, x, a, l] := d[x, p] * p2[r, l, p] * f[i, x, r] * e[x, r] * plr[p]
-    @einsum PrlBeA[x, a, l] := d[x, p] * p2[r, l, p] * f[a, x, r] * e[x, r] * prl[p]
-    # case eBA
-    @einsum LlreBA[a, r] := d[x, p] * p2[r, l, p] * f[a, x, l] * e[x, l] * llr[p]
-    @einsum LrleBA[i, a, r] := d[x, p] * p2[r, l, p] * f[i, x, l] * e[x, l] * lrl[p]
-    @einsum PlreBA[x, a, r] := d[x, p] * p2[r, l, p] * f[a, x, l] * e[x, l] * plr[p]
-    @einsum PrleBA[i, x, a, r] := d[x, p] * p2[r, l, p] * f[i, x, l] * e[x, l] * prl[p]
-    # case CBA: no need
-    names = (:UA, :LlAe)
-    vars = (UA, LlAe)
-    for (name, var) in zip(names, vars)
-        h.p[name] = var
+function compile!(h, g)
+    dsum(x; dims) = dropdims(sum(x; dims); dims)
+    # w: original weight, a: action, p: parent, c1/2:children
+    h.a[:sft1] = dsum(h.w[:Az], dims=(1,2)) +
+                 dsum(h.w[:Aez], dims=(1,2,3)) +
+                 dsum(h.w[:Aze], dims=(1,2,3)) +
+                 dsum(h.w[:Azz], dims=(1,2,3)) +
+                 dsum(h.w[:eAz], dims=(1,2,3))
+    h.a[:sft2] = dsum(h.w[:BAz], dims=(1,2))
+    h.a[:A]    = dsum(h.w[:A], dims=1)
+    h.a[:Ae]   = dsum(h.w[:Ae], dims=(1,2))
+    h.a[:eA]   = dsum(h.w[:eA], dims=(1,2))
+    h.a[:Aee]  = dsum(h.w[:Aee], dims=(1,2,3))
+    h.a[:eAe]  = dsum(h.w[:eAe], dims=(1,2,3))
+    h.a[:eeA]  = dsum(h.w[:eeA], dims=(1,2,3))
+    h.a[:BA]   = dsum(h.w[:BA], dims=1)
+    h.a[:BAe]  = dsum(h.w[:BAe], dims=(1,2))
+    h.a[:BeA]  = dsum(h.w[:BeA], dims=(1,2))
+    h.a[:eBA]  = dsum(h.w[:eBA], dims=(1,2))
+    h.a[:CBA]  = dsum(h.w[:CBA], dims=1)
+    h.p[:A]    = normalize(h.w[:A])
+    h.p[:Ae]   = normalize(dsum(h.w[:Ae], dims=1))
+    h.p[:eA]   = normalize(dsum(h.w[:eA], dims=1))
+    h.p[:Aee]  = normalize(dsum(h.w[:Aee], dims=(1,2)))
+    h.p[:eAe]  = normalize(dsum(h.w[:eAe], dims=(1,2)))
+    h.p[:eeA]  = normalize(dsum(h.w[:eeA], dims=(1,2)))
+    h.p[:BA]   = normalize(h.w[:BA])
+    h.p[:BAe]  = normalize(dsum(h.w[:BAe], dims=1))
+    h.p[:BeA]  = normalize(dsum(h.w[:BeA], dims=1))
+    h.p[:eBA]  = normalize(dsum(h.w[:eBA], dims=1))
+    h.p[:CBA]  = normalize(h.w[:CBA])
+    h.c1[:Ae]  = normalize(h.w[:Ae])
+    h.c1[:eA]  = normalize(h.w[:eA])
+    h.c1[:Aee] = normalize(dsum(h.w[:Aee], dims=1))
+    h.c1[:eAe] = normalize(dsum(h.w[:eAe], dims=1))
+    h.c1[:eeA] = normalize(dsum(h.w[:eeA], dims=1))
+    h.c1[:BAe] = normalize(h.w[:BAe])
+    h.c1[:BeA] = normalize(h.w[:BeA])
+    h.c1[:eBA] = normalize(h.w[:eBA])
+    h.c2[:Aee] = normalize(h.w[:Aee])
+    h.c2[:eAe] = normalize(h.w[:eAe])
+    h.c2[:eeA] = normalize(h.w[:eeA])
+end
+
+function getaction(h, action, As, Bs=0, Cs=0)
+    if action == :sft
+        return h.a[:sft1][As] + (Bs > 0 ? h.a[:sft2][As, Bs] : 0)
+    elseif action in (:A, :Ae, :eA, :Aee, :eAe, :eeA)
+        return h.a[action][As]
+    elseif Bs > 0 && action in (:BA, :BAe, :BeA, :eBA)
+        return h.a[action][As, Bs]
+    elseif Bs > 0 && Cs > 0 && action == :CBA
+        return h.a[action][As, Bs, Cs]
+    else
+        return Float32(0)
+    end
+end
+
+function getparent(h, action, As, Bs=0, Cs=0)
+    if action in (:A, :Ae, :eA, :Aee, :eAe, :eeA)
+        return h.p[action][:, As]
+    elseif Bs > 0 && action in (:BA, :BAe, :BeA, :eBA)
+        return h.p[action][:, As, Bs]
+    elseif Bs > 0 && Cs > 0 && action == :CBA
+        return h.p[action][:, As, Bs, Cs]
+    else
+        warning("Parent don't exist")
+    end
+end
+
+function getchild1(h, action, Ps, As, Bs=0)
+    if action in (:Ae, :eA, :Aee, :eAe, :eeA)
+        return h.c1[action][:, Ps, As]
+    elseif Bs > 0 && action in (:BAe, :BeA, :eBA)
+        return h.c1[action][:, Ps, As, Bs]
+    else
+        warning("Child1 don't exist")
+    end
+end
+
+function getchild2(h, action, C1s, Ps, As)
+    if action in (:Aee, :eAe, :eeA)
+        return h.c2[action][:, C1s, Ps, As]
+    else
+        warning("Child2 don't exist")
     end
 end
 
@@ -178,6 +201,46 @@ function get_nul_left(h::BUHeuristics, g::GrammarEx, sym, right=0)
                       g.h.p_l[:, sym]' * h.nul
 end
 
+function count_A!(h, p, l, nl)
+    if !nl
+        h.w[:A][p, l] += h.decay
+    end
+end
+
+function count_BA!(h, p, l, nl, r, nr)
+    if nl && !nr
+        h.w[:eA][l, p, r] += h.decay
+    elseif !nl && nr
+        h.w[:Ae][r, p, l] += h.decay
+    elseif !nl && !nr
+        h.w[:BA][p, r, l] += h.decay
+        h.w[:Az][r, p, l] += h.decay
+    end
+end
+
+function count_CBA!(h, p, l, nl, r, nr, d, nd)
+    if nl && nr && !nd
+        h.w[:eeA][r, l, p, d] += h.decay
+    elseif nl && !nr && nd
+        h.w[:eAe][d, l, p, r] += h.decay
+    elseif !nl && nr && nd
+        h.w[:Aee][d, r, p, l] += h.decay
+    elseif nl && !nr && !nd
+        h.w[:eAz][d, l, p, r] += h.decay
+        h.w[:eBA][l, p, d, r] += h.decay
+    elseif !nl && nr && !nd
+        h.w[:Aez][d, r, p, l] += h.decay
+        h.w[:BeA][r, p, d, l] += h.decay
+    elseif !nl && !nr && nd
+        h.w[:Aze][d, r, p, l] += h.decay
+        h.w[:BAe][d, p, r, l] += h.decay
+    elseif !nl && !nr && !nd
+        h.w[:Azz][d, r, p, l] += h.decay
+        h.w[:BAz][d, p, r, l] += h.decay
+        h.w[:CBA][p, d, r, l] += h.decay
+    end
+end
+
 function simulate!(h::BUHeuristics, sym::Int, input::Int, g::GrammarEx)
     type = g.type[sym] # symbol type
     h.tot += h.decay
@@ -189,6 +252,7 @@ function simulate!(h::BUHeuristics, sym::Int, input::Int, g::GrammarEx)
         if type == U
             output = output_left
             isnul = isnul_left
+            count_A!(h, sym, left, isnul_left)
         else
             right, _ = sample(g.h.p_right[:, left, sym])
             if type in (Ll, Lr, Llr, Lrl)
@@ -204,11 +268,18 @@ function simulate!(h::BUHeuristics, sym::Int, input::Int, g::GrammarEx)
                 output = output_right
                 isnul = isnul_left && isnul_right
             elseif type in (Llr, Plr)
+                dynam = output_left
                 output, isnul_dynam = simulate!(h, output_left, output_right, g)
                 isnul = isnul_left && isnul_right && isnul_dynam
             else # type in (Lrl, Prl) 
+                dynam = output_right
                 output, isnul_dynam = simulate!(h, output_right, output_left, g)
                 isnul = isnul_left && isnul_right && isnul_dynam
+            end
+            if type in (Ll, Lr, Pl, Pr)
+                count_BA!(h, sym, left, isnul_left, right, isnul_right)
+            else
+                count_CBA!(h, sym, left, isnul_left, right, isnul_right, dynam, isnul_dynam)
             end
         end
     elseif type == Fn
@@ -232,13 +303,22 @@ function simulate!(h::BUHeuristics, sym::Int, input::Int, g::GrammarEx)
     return output, isnul
 end
 
+function decay!(h)
+    h.tot *= 1 - h.decay
+    for k in keys(h.w)
+        h.w[k] .*= 1 - h.decay
+    end
+end
+
 function learn_from_grammar(g::GrammarEx, n)
     h = BUHeuristics(0.01, size(g))
+    init!(h, g)
     generate_dataset(g, 0) # compile g.h
     for i in 1:n
-        h.tot *= 1 - h.decay
+        decay!(h)
         simulate!(h, 1, 1, g)
     end
+    compile!(h, g)
     return h
 end
 
@@ -271,9 +351,10 @@ function learn_from_dataset(g::GrammarEx, n)
     return h
 end
 
-g = test_grammar1()
-h = learn_from_grammar(g, 10000)
-compile(g, h)
+# g = test_grammar1()
+# h = learn_from_grammar(g, 10000)
+# println("finish")
+
 # using LinearAlgebra: norm
 # g = test_grammar3()
 # h0 = learn_from_grammar(g, 10000)
