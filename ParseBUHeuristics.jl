@@ -4,11 +4,11 @@ include("GrammarEx.jl")
 include("ParseUtil.jl")
 include("ParseTDPF.jl")
 include("Learning1.jl")
-using Einsum
 
 mutable struct BUHeuristics
     decay::Float32 # decay rate of moving average
     tot::Float32 # total symbol count
+    obs::Float32 # total observation count
     sym::Vector{Float32} # symbol prob
     nul::Vector{Float32} # null prob per symbol
     in::Matrix{Float32} # input prob per symbol
@@ -21,7 +21,7 @@ mutable struct BUHeuristics
     c1::Dict
     c2::Dict
 end
-BUHeuristics(decay, n) = BUHeuristics(decay, 1, 
+BUHeuristics(decay, n) = BUHeuristics(decay, 1, 1,
     ones(Float32, n), 
     ones(Float32, n), 
     ones(Float32, n, n), 
@@ -171,6 +171,10 @@ function getchild2(h, action, C1s, Ps, As)
     end
 end
 
+function getsym(h::BUHeuristics, sym)
+    return h.sym[sym] * h.tot / h.obs
+end
+
 function get_prob(h::BUHeuristics, sym, in=0, out=0)
     if in == 0 && out == 0
         return h.sym[sym]
@@ -290,6 +294,7 @@ function simulate!(h::BUHeuristics, sym::Int, input::Int, g::GrammarEx)
         isnul = true
     elseif type == Tr
         # write(io, g.label[sym])
+        h.obs += h.decay
         output = input
         isnul = false
     else # type == Id
@@ -305,6 +310,7 @@ end
 
 function decay!(h)
     h.tot *= 1 - h.decay
+    h.obs *= 1 - h.decay
     for k in keys(h.w)
         h.w[k] .*= 1 - h.decay
     end
