@@ -14,26 +14,32 @@ mutable struct BUHeuristics
     in::Matrix{Float32} # input prob per symbol
     out::Matrix{Float32} # output prob per symbol
     oi::Array{Float32, 3} # output prob per symbol-input
-    io::Array{Float32, 3} # input prob per symbol-output
+    nul_oi::Array{Float32, 3} # output prob per symbol-input given not observations
     w::Dict
     a::Dict
     p::Dict
     c1::Dict
     c2::Dict
 end
-BUHeuristics(decay, n) = BUHeuristics(decay, 1, 1,
-    ones(Float32, n), 
-    ones(Float32, n), 
-    ones(Float32, n, n), 
-    ones(Float32, n, n), 
-    ones(Float32, n, n, n), 
-    ones(Float32, n, n, n), 
-    Dict(),
-    Dict(),
-    Dict(),
-    Dict(),
-    Dict()
-    )
+
+function init_buheuristics(g::GrammarEx, decay=0.01)
+    n = size(g)
+    h = BUHeuristics(decay, 1, 1,
+        ones(Float32, n), 
+        ones(Float32, n), 
+        ones(Float32, n, n), 
+        ones(Float32, n, n), 
+        ones(Float32, n, n, n), 
+        ones(Float32, n, n, n), 
+        Dict(),
+        Dict(),
+        Dict(),
+        Dict(),
+        Dict())
+    init!(h, g)
+    return h
+end
+    
 function init!(h::BUHeuristics, g)
     names1 = (:Ae, :Az, :eA, :BA)
     names2 = (:Aee, :Aez, :Aze, :Azz, 
@@ -70,20 +76,22 @@ function count_oi!(h::BUHeuristics, out, in, sym, w=1)
     h.oi[:, in, sym] .*= 1 - h.decay * w
     h.oi[out, in, sym] += h.decay * w
 end
-function count_io!(h::BUHeuristics, in, out, sym, w=1)
-    h.io[:, out, sym] .*= 1 - h.decay * w
-    h.io[in, out, sym] += h.decay * w
+
+function count_nul_oi!(h::BUHeuristics, isnul, out, in, sym, w=1)
+    if isnul
+        h.nul_oi[:, out, sym] .*= 1 - h.decay * w
+        h.nul_oi[in, out, sym] += h.decay * w
+    end
 end
 
 function count_nul!(h::BUHeuristics, isnul, sym, w=1)
-    # TODO: add input dependency and output distribution nul_oi
     h.nul[sym] *= 1 - h.decay * w
     if isnul
         h.nul[sym] += h.decay * w
     end
 end
 
-function compile!(h, g)
+function compile!(h::BUHeuristics, g::GrammarEx)
     dsum(x; dims) = dropdims(sum(x; dims); dims)
     # w: original weight, a: action, p: parent, c1/2:children
     h.a[:sft1] = dsum(h.w[:Az], dims=(1,2)) +
@@ -303,7 +311,7 @@ function simulate!(h::BUHeuristics, sym::Int, input::Int, g::GrammarEx)
     end
     count_out!(h, output, sym)
     count_oi!(h, output, input, sym)
-    count_io!(h, input, output, sym)
+    count_nul_oi!(h, isnul, output, input, sym)
     count_nul!(h, isnul, sym)
     return output, isnul
 end
@@ -316,9 +324,10 @@ function decay!(h)
     end
 end
 
+
+
 function learn_from_grammar(g::GrammarEx, n)
-    h = BUHeuristics(0.01, size(g))
-    init!(h, g)
+    h = init_buheuristics(g, 0.01)
     generate_dataset(g, 0) # compile g.h
     for i in 1:n
         decay!(h)
@@ -345,7 +354,7 @@ function update!(h::BUHeuristics, t::Tree, w)
 end
 
 function learn_from_dataset(g::GrammarEx, n)
-    h = BUHeuristics(0.01, size(g))
+    h = init_buheuristics(g, 0.01)
     for (data, _) in generate_dataset(g, n)
         ps, _ = parse_tdpf(data, g, 10, 10, false)
         weighted_trees = get_weighted_trees(ps)
@@ -357,9 +366,9 @@ function learn_from_dataset(g::GrammarEx, n)
     return h
 end
 
-# g = test_grammar1()
-# h = learn_from_grammar(g, 10000)
-# println("finish")
+g = test_grammar1()
+h = learn_from_grammar(g, 10000)
+println("finish")
 
 # using LinearAlgebra: norm
 # g = test_grammar3()

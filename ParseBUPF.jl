@@ -141,15 +141,15 @@ function evalfactor(ptl::BUParticle, factor::Factor, g, h)
         # rel == :out && in > 0 && return g.h.p_fn[:, in, offset(sym, g)] 
         # rel == :in && out > 0 && return g.h.p_fn[out, :, offset(sym, g)] 
     else # type in Cm
-        rel == :out && in > 0 && return h.oi[:, in, sym] 
-        rel == :in && out > 0 && return h.oi[out, :, sym] 
+        rel == :out && in > 0 && return h.nul_oi[:, in, sym] 
+        rel == :in && out > 0 && return h.nul_oi[out, :, sym] 
     end
     return w_def
 end
 
 function addleaf!(ptl, g; sym, in, out)
-    state = BUState(sym, in, out)
     type = g.type[getval(ptl, sym)]
+    state = BUState(sym, in, out, type != Tr)
     if type == Tr
         # warning("Expanding observations")
         p_leaf = 0.
@@ -164,10 +164,24 @@ function addleaf!(ptl, g; sym, in, out)
     return state, p_leaf
 end
 
+function check_nul(type, left, right, dynam)
+    if type == Fn || type == Cn || type == Id
+        return true
+    elseif type == Tr
+        return false
+    elseif type == U
+        return left.isnul
+    elseif type == Lr || type == Ll || type == Pl || type == Pr
+        return left.isnul && right.isnul
+    else
+        return left.isnul && right.isnul && dynam.isnul
+end
+
 "Perform reduction, and sample values that are ready"
 function addroot!(ptl, g, h; sym, in, out, left=nothing, right=nothing, dynam=nothing)
-    P = BUState(sym, in, out, left, right, dynam)
     Pt = g.type[getval(ptl, sym)]
+    isnul = check_nul(Pt, left, right, dynam)
+    P = BUState(sym, in, out, isnul, left, right, dynam)
     if Pt == Fn || Pt == Cn || Pt == Tr || Pt == Id
         return P, 0.
     end
@@ -283,7 +297,7 @@ function parse_shift(ptl, g, h, obs, p_sample)
     Zs = pushval!(ptl, obs)
     Zi = pushval!(ptl)
     Zo = Zi
-    Z = BUState(Zs, Zi, Zo)
+    Z = BUState(Zs, Zi, Zo, false)
     # push Z
     stack_new = cons(Z, stack)
     # weight update
@@ -578,9 +592,6 @@ is_success(ptl::BUParticle) = ptl.finish && ptl.w > 0
 
 function parse_bupf(str::String, g::GrammarEx, h::BUHeuristics, n_particle::Int=4, max_iter::Int=10)
     # init
-    w_l = sum(g.w_cm2, dims=1)[1,:,:] .+ g.w_cm1
-    w_sym = sum(w_l, dims=1)[1,:]
-    g.h = (; w_l, w_sym)
     obs_first = get_obs(g, str[1])
     particles = buparticle_init(obs_first, n_particle)
     logprob = 0. # log of marginal probability
@@ -634,6 +645,12 @@ function sample_bupf(particles, temp=1.)
     return get_trees(ptl)
 end
 
+function compile!(g::GrammarEx)
+    w_l = sum(g.w_cm2, dims=1)[1,:,:] .+ g.w_cm1
+    w_sym = sum(w_l, dims=1)[1,:]
+    g.h = (; w_l, w_sym)
+end
+
 # Random.seed!(12)
 g = test_grammar1()
 h = learn_from_grammar(g, 1000)
@@ -641,9 +658,7 @@ data = "xzx"
 # g = test_grammar2()
 # h = learn_from_grammar(g, 1000)
 # data = "1+0=1"
-# ps, _ = parse_tdpf(data, g, 10)
-# tr = sample_tdpf(ps)
-# tr isa Tree && print_tree(tr, g)
+compile!(g)
 ps, _ = parse_bupf(data, g, h, 100)
 print_trees(sample_bupf(ps), g)
 println("Finish")

@@ -74,3 +74,15 @@ function sample_n(x::Array{Float32}, n::Int, method::Symbol=:systematic)
         warning("Method $method not supported")
     end
 end
+
+"smoothen a vector with exponential decay"
+function smooth(xs, rate=0.99)
+    length(xs) == 0 && return xs
+    y = xs[1]
+    ys = [y]
+    for x in xs
+        y = rate * y + (1 - rate) * x
+        push!(ys, y)
+    end
+    return ys
+end

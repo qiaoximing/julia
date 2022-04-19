@@ -10,11 +10,12 @@ struct BUState
     sym::Int
     in::Int
     out::Int
+    isnul::Bool
     left::Union{BUState, Nothing}
     right::Union{BUState, Nothing}
     dynam::Union{BUState, Nothing}
 end
-BUState(sym, in, out) = BUState(sym, in, out, nothing, nothing, nothing)
+BUState(sym, in, out, isnul) = BUState(sym, in, out, isnul, nothing, nothing, nothing)
 
 "parse tree"
 struct Tree
@@ -31,7 +32,7 @@ fill_value(t::Tree, v) = Tree(
     TDState(v[t.state.sym], v[t.state.input], v[t.state.output]), t.prob, 
     fill_value(t.left, v), fill_value(t.right, v), fill_value(t.dynam, v))
 fill_value(s::BUState, ptl) = BUState(
-    getval(ptl, s.sym), getval(ptl, s.in), getval(ptl, s.out),
+    getval(ptl, s.sym), getval(ptl, s.in), getval(ptl, s.out), s.isnul,
     fill_value(s.left, ptl), fill_value(s.right, ptl), fill_value(s.dynam, ptl))
 
 "Print a parse tree"

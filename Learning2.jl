@@ -73,17 +73,6 @@ function get_weighted_trees(items::Vector{Item}, logprob)
     return weighted_trees
 end
 
-function smooth(xs, rate=0.99)
-    length(xs) == 0 && return xs
-    y = xs[1]
-    ys = [y]
-    for x in xs
-        y = rate * y + (1 - rate) * x
-        push!(ys, y)
-    end
-    return ys
-end
-
 function generate_sentence()
     dict = ["u", "v", "w", "x", "y", "z"]
     word1 = rand(dict)
