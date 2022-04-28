@@ -95,8 +95,7 @@ end
 Conventions:
 - LHS of the first rule will be root
 - LHS should only appear once
-- Cm nodes before Fn nodes before Cn nodes
-- `I` is reserved for Id, and cannot appear on the left
+- Cm nodes before Fn nodes before Cn nodes before Id nodes
 - Names not appeared on the left are Ob, and must have length 1"
 function init_grammar(rules::AbstractString, alpha=0)
     # parse rules as a list of tuples, set up label, nodetype and labelindex
@@ -106,21 +105,23 @@ function init_grammar(rules::AbstractString, alpha=0)
     parsedrules = Vector{Tuple}()
     for rule in split(rules, "\n")
         if rule == "" continue end
-        lhs, rhs_list = split(rule, " -> ")
+        splits = split(rule, " -> ")
+        lhs = splits[1]
         lhs_label, lhs_type_name = split(lhs, " ")
         push!(label, lhs_label)
         lhs_type = eval(Meta.parse(lhs_type_name))
         push!(nodetype, lhs_type)
-        for rhs in split(rhs_list, " | ")
-            rhs_labels_and_weight = split(rhs, " ")
-            rhs_labels = rhs_labels_and_weight[1:end-1]
-            push!(label_extra, rhs_labels...)
-            weight = Base.parse(Float, rhs_labels_and_weight[end])
-            push!(parsedrules, (lhs_label, rhs_labels, weight))
+        if length(splits) > 1
+            rhs_list = splits[2]
+            for rhs in split(rhs_list, " | ")
+                rhs_labels_and_weight = split(rhs, " ")
+                rhs_labels = rhs_labels_and_weight[1:end-1]
+                push!(label_extra, rhs_labels...)
+                weight = Base.parse(Float, rhs_labels_and_weight[end])
+                push!(parsedrules, (lhs_label, rhs_labels, weight))
+            end
         end
     end
-    push!(label, "I")
-    push!(nodetype, Id)
     for rhs_label in label_extra
         if !(rhs_label in label)
             push!(label, rhs_label)
@@ -345,7 +346,9 @@ function parse_step!(prs::Parser, root::Node, obs::Observation)
     weight_update = Float(1)
     new_stack = tail(prs.stack) # always pop the top node
     if type == Fn
-        input == ObX && sampleobs!(prs, root.input)
+        if input == ObX 
+            input = sampleobs!(prs, root.input)
+        end
         distr = distr_fn(prs.grammar, sym, input)
         setdistr!(prs, root.output, distr)
         samplevalue!(prs, root.output)
@@ -384,10 +387,10 @@ function parse_step!(prs::Parser, root::Node, obs::Observation)
         prs = new_prs # keep this in parse history for tree printing
         new_prs = Parser(tail(prs.stack), prs.value, prs.distr, prs.grammar, prs.max_iter, prs)
     end
-    println("Observation: $obs")
-    println("Processing node: $(prs.grammar.label[sym])")
-    println("Weight update: $weight_update")
-    printstatus(prs)
+    # println("Observation: $obs")
+    # println("Processing node: $(prs.grammar.label[sym])")
+    # println("Weight update: $weight_update")
+    # printstatus(prs)
     return new_prs, finish, weight_update
 end
 
@@ -650,6 +653,7 @@ function simulate(pf::ParticleFilter, item::ParticleItem)
     # use item as seed to generate a particle system
     ps = ParticleSystem(pf.num_particles, item)
     # go one more step after the last observation
+    ess_log = Vector{Float}()
     for step in 1:length(pf.observations) + 1
         new_ps = ParticleSystem{typeof(item)}()
         # draw new particles independently
@@ -664,8 +668,10 @@ function simulate(pf::ParticleFilter, item::ParticleItem)
             push!(new_ps, new_particle)
         end
         ps = new_ps
-        printstatus(ps)
+        push!(ess_log, effective_sample_size(ps))
+        # printstatus(ps)
     end
+    println("ESS Trace: $ess_log")
     return ps
 end
 
