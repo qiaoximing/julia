@@ -130,19 +130,15 @@ function evalfactor(ptl::BUParticle, factor::Factor, g, h)
     rel = factor.relation
     type = g.type[sym]
     if type == Id || type == Tr
-        # onehot_(x) = x > 0 ? onehot(size(g), x) : w_def
         warning("Factor on $type")
     elseif type == Cn
-        rel == :out && return h.out[:, sym]
-        # rel == :out && return g.h.p_cn[:, offset(sym, g)]
+        rel == :out && return (g.alpha / g.n_id + h.out2[:, sym]) / (g.alpha + h.out1[sym])
     elseif type == Fn
-        rel == :out && in > 0 && return h.oi[:, in, sym]
-        rel == :in && out > 0 && return h.oi[out, :, sym]
-        # rel == :out && in > 0 && return g.h.p_fn[:, in, offset(sym, g)] 
-        # rel == :in && out > 0 && return g.h.p_fn[out, :, offset(sym, g)] 
+        rel == :out && in > 0 && return (g.alpha / g.n_id + h.oi3[:, in, sym]) / (g.alpha + h.oi2a[in, sym])
+        rel == :in && out > 0 && return (g.alpha / g.n_id + h.oi3[out, :, sym]) / (g.alpha + h.oi2b[out, sym])
     else # type in Cm
-        rel == :out && in > 0 && return h.nul_oi[:, in, sym] 
-        rel == :in && out > 0 && return h.nul_oi[out, :, sym] 
+        rel == :out && in > 0 && return (g.alpha / g.n_id + h.nul_oi3[:, in, sym]) / (g.alpha + h.nul_oi2a[in, sym])
+        rel == :in && out > 0 && return (g.alpha / g.n_id + h.nul_oi3[out, :, sym]) / (g.alpha + h.nul_oi2b[out, sym])
     end
     return w_def
 end
@@ -175,6 +171,7 @@ function check_nul(type, left, right, dynam)
         return left.isnul && right.isnul
     else
         return left.isnul && right.isnul && dynam.isnul
+    end
 end
 
 "Perform reduction, and sample values that are ready"
@@ -186,13 +183,12 @@ function addroot!(ptl, g, h; sym, in, out, left=nothing, right=nothing, dynam=no
         return P, 0.
     end
     p_root = 1.
-    # TODO: add g.alpha when training
     if Pt != U
-        p_root *= g.h.w_l[getval(ptl, left.sym), getval(ptl, sym)] / 
-                  g.h.w_sym[getval(ptl, sym)]
+        p_root *= (g.alpha / g.n_id^2 + g.h.w_l[getval(ptl, left.sym), getval(ptl, sym)]) / 
+                  (g.alpha + g.h.w_sym[getval(ptl, sym)])
     else
-        p_root *= g.w_cm2[getval(ptl, right.sym), getval(ptl, left.sym), getval(ptl, sym)] /
-                  g.h.w_sym[getval(ptl, sym)]
+        p_root *= (g.alpha / g.n_id^2 + g.w_cm2[getval(ptl, right.sym), getval(ptl, left.sym), getval(ptl, sym)]) /
+                  (g.alpha + g.h.w_sym[getval(ptl, sym)])
     end
     if Pt == Lr
         p_root *= sampleval!(ptl, left.out, g, h)
@@ -241,9 +237,11 @@ function sample_action(ptl, g, h, is_last_step)
     else
         # evaluate weights for action sampling
         As, Bs, Cs = get_top_syms(ptl)
-        action_list = (:sft, :A, :Ae, :eA, :Aee, :eAe, :eeA, 
-                       :BA, :BAe, :BeA, :eBA, :CBA)
-        weight = [getaction(h, action, As, Bs, Cs) for action in action_list]
+        # action_list = (:sft, :A, :Ae, :eA, :Aee, :eAe, :eeA, 
+        #                :BA, :BAe, :BeA, :eBA, :CBA)
+        # TODO: for now only allow 2-reduction
+        action_list = (:sft, :Ae, :eA, :BA)
+        weight = [getaction(g, h, action, As, Bs, Cs) for action in action_list]
         # prevent shift in the last step
         if is_last_step 
             weight[1] = 0 
@@ -256,11 +254,11 @@ end
 
 function sample_parent(ptl, g, h, action)
     As, Bs, Cs = get_top_syms(ptl)
-    weight = getparent(h, action, As, Bs, Cs)
-    # TODO: add exploration
-    # weight[1:g.n_cm] .+= g.alpha / g.n_cm
+    weight = getparent(g, h, action, As, Bs, Cs)
     # remove all non-Cm symbols
-    # weight[g.n_cm + 1:end] .= 0.
+    weight[g.n_cm + 1:end] .= 0.
+    # TODO: for now remove all recursive grammar
+    weight[As:end] .= 0
     distr = normalize(weight)
     parent, prob = sample(distr)
     return parent, prob
@@ -271,15 +269,19 @@ function sample_children(ptl, g, h, action, parent)
         return [], 1.
     end
     As, Bs, _ = get_top_syms(ptl)
-    weight1 = getchild1(h, action, parent, As, Bs)
+    weight1 = getchild1(g, h, action, parent, As, Bs)
     # remove all Tr symbols
-    # weight1[range(Tr, g)] .= 0.
+    weight1[range(Tr, g)] .= 0.
+    # TODO: for now remove all Cm symbols
+    weight1[1:g.n_cm] .= 0.
     distr1 = normalize(weight1)
     child1, prob1 = sample(distr1)
     if action in (:Aee, :eAe, :eeA)
-        weight2 = getchild2(h, action, child1, parent, As)
+        weight2 = getchild2(g, h, action, child1, parent, As)
         # remove all Tr symbols
-        # weight2[range(Tr, g)] .= 0.
+        weight2[range(Tr, g)] .= 0.
+        # TODO: for now remove all Cm symbols
+        weight2[1:g.n_cm] .= 0.
         distr2 = normalize(weight2)
         child2, prob2 = sample(distr2)
         children = [child1, child2]
@@ -301,7 +303,7 @@ function parse_shift(ptl, g, h, obs, p_sample)
     # push Z
     stack_new = cons(Z, stack)
     # weight update
-    p_target = getsym(h, obs)
+    p_target = getsym(g, h, obs)
     w_new = ptl.w * p_target / p_sample
     return BUParticle(w_new, ptl.obs_idx + 1, false, stack_new, 
                       ptl.values, ptl.dset, ptl.factors, ptl)
@@ -475,12 +477,12 @@ function parse_reduce(ptl, g, h, action, children, parent, p_sample)
     p_target *= p_root
     if p_target > 0.
         # adjust weight by getsym
-        p_target *= getsym(h, parent) / getsym(h, getval(ptl, A.sym))
+        p_target *= getsym(g, h, parent) / getsym(g, h, getval(ptl, A.sym))
         if action in (:BA, :eBA, :BeA, :BAe, :CBA)
-            p_target /= getsym(h, getval(ptl, B.sym))
+            p_target /= getsym(g, h, getval(ptl, B.sym))
         end
         if action == :CBA
-            p_target /= getsym(h, getval(ptl, C.sym))
+            p_target /= getsym(g, h, getval(ptl, C.sym))
         end
     end
     w_new = ptl.w * p_target / p_sample
@@ -488,7 +490,7 @@ function parse_reduce(ptl, g, h, action, children, parent, p_sample)
                       ptl.values, ptl.dset, ptl.factors, ptl)
 end
 
-function parse_finish(ptl, g, success)
+function parse_finish(ptl, g, h, success)
     if !success
         w_new = 0.
     else
@@ -504,13 +506,14 @@ function parse_finish(ptl, g, success)
 end
 
 "Progress a particle forward to the next observation"
-function forward(ptl::BUParticle, str::String, g::GrammarEx, h::BUHeuristics, max_iter::Int)
+function forward(ptl::BUParticle, str::String, g::GrammarEx, h::BUHeuristics)
     is_last_step = ptl.obs_idx > length(str)
     action, prob_act = sample_action(ptl, g, h, is_last_step)
     debugln("Action: $action $prob_act")
     if action == :sft
         # shift the next observation
         obs = get_obs(g, str[ptl.obs_idx])
+        debugln("Shift: $obs")
         p_sample = prob_act
         ptl = parse_shift(ptl, g, h, obs, p_sample)
     else
@@ -524,7 +527,7 @@ function forward(ptl::BUParticle, str::String, g::GrammarEx, h::BUHeuristics, ma
         # finish when reaching symbol S (id=1)
         if getval(ptl, head(ptl.stack).sym) == 1
             success = is_last_step && length(ptl.stack) == 1
-            ptl = parse_finish(ptl, g, success)
+            ptl = parse_finish(ptl, g, h, success)
         end
     end
     return ptl
@@ -547,11 +550,11 @@ function buparticle_init(obs, n_particle)
     return particles
 end
 
-function forward_all!(particles, args...)
+function forward_all!(particles, str, g, h)
     for (i, ptl) in enumerate(particles)
         if !ptl.finish
             debugln("Simulating particle $i")
-            particles[i] = forward(ptl, args...)
+            particles[i] = forward(ptl, str, g, h)
             debugln("Weight: $(particles[i].w)")
             # print_trees(get_trees(particles[i]), g)
         end
@@ -597,10 +600,9 @@ function parse_bupf(str::String, g::GrammarEx, h::BUHeuristics, n_particle::Int=
     logprob = 0. # log of marginal probability
     # start parsing
     # for char in str[2:end]
-    max_step = 17
-    for step in 1:max_step
+    for step in 1:max_iter
         # progress the particle
-        forward_all!(particles, str, g, h, max_iter)
+        forward_all!(particles, str, g, h)
         # check failure
         if is_all_fail(particles)
             debugln("All particles fail")
@@ -651,14 +653,14 @@ function compile!(g::GrammarEx)
     g.h = (; w_l, w_sym)
 end
 
-# Random.seed!(12)
-g = test_grammar1()
-h = learn_from_grammar(g, 1000)
-data = "xzx"
-# g = test_grammar2()
+# # Random.seed!(12)
+# g = test_grammar1()
 # h = learn_from_grammar(g, 1000)
-# data = "1+0=1"
-compile!(g)
-ps, _ = parse_bupf(data, g, h, 100)
-print_trees(sample_bupf(ps), g)
-println("Finish")
+# data = "xzx"
+# # g = test_grammar2()
+# # h = learn_from_grammar(g, 1000)
+# # data = "1+0=1"
+# compile!(g)
+# ps, _ = parse_bupf(data, g, h, 100)
+# print_trees(sample_bupf(ps), g)
+# println("Finish")

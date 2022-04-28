@@ -80,7 +80,7 @@ function test1()
     cnt = 0
     println(dataset(10))
     perplexity = []
-    for data in dataset(1000)
+    for data in dataset(3000)
         ps, logprob = parse_tdpf(data, g, 100, 10, true)
         grammar_decay!(g, 0.99)
         isnan(logprob) && continue
@@ -226,7 +226,7 @@ function test4()
     # println("Count: $cnt")
     println(maximum(g.w_cm2))
 end
-# test1()
+test1()
 # test2()
 # test3()
 # test4()

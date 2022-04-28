@@ -6,32 +6,49 @@ include("ParseTDPF.jl")
 include("Learning1.jl")
 
 mutable struct BUHeuristics
+    alpha::Float32 # exploration rate = g.alpha
     decay::Float32 # decay rate of moving average
     tot::Float32 # total symbol count
     obs::Float32 # total observation count
     sym::Vector{Float32} # symbol prob
+    sym1::Vector{Float32} # symbol count
     nul::Vector{Float32} # null prob per symbol
     in::Matrix{Float32} # input prob per symbol
     out::Matrix{Float32} # output prob per symbol
+    out2::Matrix{Float32} # output count per symbol
+    out1::Vector{Float32} # total count per symbol
     oi::Array{Float32, 3} # output prob per symbol-input
+    oi3::Array{Float32, 3} # output count per symbol-input
+    oi2a::Array{Float32, 2} # total count per symbol-input
+    oi2b::Array{Float32, 2} # total count per symbol-input
     nul_oi::Array{Float32, 3} # output prob per symbol-input given not observations
-    w::Dict
-    a::Dict
-    p::Dict
-    c1::Dict
-    c2::Dict
+    nul_oi3::Array{Float32, 3} # output prob per symbol-input given not observations
+    nul_oi2a::Array{Float32, 2} # total prob per symbol-input given not observations
+    nul_oi2b::Array{Float32, 2} # total prob per symbol-input given not observations
+    w1::Dict
+    w2::Dict
+    w3::Dict
+    w4::Dict
 end
 
 function init_buheuristics(g::GrammarEx, decay=0.01)
     n = size(g)
-    h = BUHeuristics(decay, 1, 1,
-        ones(Float32, n), 
-        ones(Float32, n), 
-        ones(Float32, n, n), 
-        ones(Float32, n, n), 
-        ones(Float32, n, n, n), 
-        ones(Float32, n, n, n), 
-        Dict(),
+    h = BUHeuristics(g.alpha, decay, 0, 0,
+        zeros(Float32, n), 
+        zeros(Float32, n), 
+        zeros(Float32, n), 
+        zeros(Float32, n, n), 
+        zeros(Float32, n, n), 
+        zeros(Float32, n, n), 
+        zeros(Float32, n), 
+        zeros(Float32, n, n, n), 
+        zeros(Float32, n, n, n), 
+        zeros(Float32, n, n), 
+        zeros(Float32, n, n), 
+        zeros(Float32, n, n, n), 
+        zeros(Float32, n, n, n), 
+        zeros(Float32, n, n), 
+        zeros(Float32, n, n), 
         Dict(),
         Dict(),
         Dict(),
@@ -49,12 +66,18 @@ function init!(h::BUHeuristics, g)
     # unknown children from right to left
     # then parent 
     # then the known children from right to left
-    h.w[:A] = ones(Float32, g.n_id, g.n_id)
+    h.w2[:A] = zeros(Float32, g.n_id, g.n_id)
+    h.w1[:A] = zeros(Float32, g.n_id)
     for name in names1
-        h.w[name] = ones(Float32, g.n_id, g.n_id, g.n_id)
+        h.w3[name] = zeros(Float32, g.n_id, g.n_id, g.n_id)
+        h.w2[name] = zeros(Float32, g.n_id, g.n_id)
+        h.w1[name] = zeros(Float32, g.n_id)
     end
     for name in names2
-        h.w[name] = ones(Float32, g.n_id, g.n_id, g.n_id, g.n_id)
+        h.w4[name] = zeros(Float32, g.n_id, g.n_id, g.n_id, g.n_id)
+        h.w3[name] = zeros(Float32, g.n_id, g.n_id, g.n_id)
+        h.w2[name] = zeros(Float32, g.n_id, g.n_id)
+        h.w1[name] = zeros(Float32, g.n_id)
     end
 end
 
@@ -91,96 +114,62 @@ function count_nul!(h::BUHeuristics, isnul, sym, w=1)
     end
 end
 
-function compile!(h::BUHeuristics, g::GrammarEx)
-    dsum(x; dims) = dropdims(sum(x; dims); dims)
-    # w: original weight, a: action, p: parent, c1/2:children
-    h.a[:sft1] = dsum(h.w[:Az], dims=(1,2)) +
-                 dsum(h.w[:Aez], dims=(1,2,3)) +
-                 dsum(h.w[:Aze], dims=(1,2,3)) +
-                 dsum(h.w[:Azz], dims=(1,2,3)) +
-                 dsum(h.w[:eAz], dims=(1,2,3))
-    h.a[:sft2] = dsum(h.w[:BAz], dims=(1,2))
-    h.a[:A]    = dsum(h.w[:A], dims=1)
-    h.a[:Ae]   = dsum(h.w[:Ae], dims=(1,2))
-    h.a[:eA]   = dsum(h.w[:eA], dims=(1,2))
-    h.a[:Aee]  = dsum(h.w[:Aee], dims=(1,2,3))
-    h.a[:eAe]  = dsum(h.w[:eAe], dims=(1,2,3))
-    h.a[:eeA]  = dsum(h.w[:eeA], dims=(1,2,3))
-    h.a[:BA]   = dsum(h.w[:BA], dims=1)
-    h.a[:BAe]  = dsum(h.w[:BAe], dims=(1,2))
-    h.a[:BeA]  = dsum(h.w[:BeA], dims=(1,2))
-    h.a[:eBA]  = dsum(h.w[:eBA], dims=(1,2))
-    h.a[:CBA]  = dsum(h.w[:CBA], dims=1)
-    h.p[:A]    = normalize(h.w[:A])
-    h.p[:Ae]   = normalize(dsum(h.w[:Ae], dims=1))
-    h.p[:eA]   = normalize(dsum(h.w[:eA], dims=1))
-    h.p[:Aee]  = normalize(dsum(h.w[:Aee], dims=(1,2)))
-    h.p[:eAe]  = normalize(dsum(h.w[:eAe], dims=(1,2)))
-    h.p[:eeA]  = normalize(dsum(h.w[:eeA], dims=(1,2)))
-    h.p[:BA]   = normalize(h.w[:BA])
-    h.p[:BAe]  = normalize(dsum(h.w[:BAe], dims=1))
-    h.p[:BeA]  = normalize(dsum(h.w[:BeA], dims=1))
-    h.p[:eBA]  = normalize(dsum(h.w[:eBA], dims=1))
-    h.p[:CBA]  = normalize(h.w[:CBA])
-    h.c1[:Ae]  = normalize(h.w[:Ae])
-    h.c1[:eA]  = normalize(h.w[:eA])
-    h.c1[:Aee] = normalize(dsum(h.w[:Aee], dims=1))
-    h.c1[:eAe] = normalize(dsum(h.w[:eAe], dims=1))
-    h.c1[:eeA] = normalize(dsum(h.w[:eeA], dims=1))
-    h.c1[:BAe] = normalize(h.w[:BAe])
-    h.c1[:BeA] = normalize(h.w[:BeA])
-    h.c1[:eBA] = normalize(h.w[:eBA])
-    h.c2[:Aee] = normalize(h.w[:Aee])
-    h.c2[:eAe] = normalize(h.w[:eAe])
-    h.c2[:eeA] = normalize(h.w[:eeA])
-end
-
-function getaction(h, action, As, Bs=0, Cs=0)
+function getaction(g, h, action, As, Bs=0, Cs=0)
     if action == :sft
-        return h.a[:sft1][As] + (Bs > 0 ? h.a[:sft2][As, Bs] : 0)
+        return (5 * g.alpha / g.n_id) + h.w1[:Az][As] + h.w1[:Aez][As] +
+            h.w1[:Aze][As] + h.w1[:Azz][As] + h.w1[:eAz][As] + 
+            (Bs > 0 ? h.w2[:BAz][As, Bs] + g.alpha / g.n_id : 0)
     elseif action in (:A, :Ae, :eA, :Aee, :eAe, :eeA)
-        return h.a[action][As]
+        return h.w1[action][As] + g.alpha / g.n_id
     elseif Bs > 0 && action in (:BA, :BAe, :BeA, :eBA)
-        return h.a[action][As, Bs]
+        # return h.w2[action][As, Bs] + g.alpha / g.n_id^2
+        return h.w2[action][As, Bs] + g.alpha / g.n_id
     elseif Bs > 0 && Cs > 0 && action == :CBA
-        return h.a[action][As, Bs, Cs]
+        return h.w3[action][As, Bs, Cs] + g.alpha / g.n_id^3
     else
         return Float32(0)
     end
 end
 
-function getparent(h, action, As, Bs=0, Cs=0)
+function getparent(g, h, action, As, Bs=0, Cs=0)
     if action in (:A, :Ae, :eA, :Aee, :eAe, :eeA)
-        return h.p[action][:, As]
+        return (h.w2[action][:, As] .+ g.alpha / g.n_id^2) / 
+               (h.w1[action][As] + g.alpha / g.n_id)
     elseif Bs > 0 && action in (:BA, :BAe, :BeA, :eBA)
-        return h.p[action][:, As, Bs]
+        return (h.w3[action][:, As, Bs] .+ g.alpha / g.n_id^3) / 
+               (h.w2[action][As, Bs] + g.alpha / g.n_id^2)
     elseif Bs > 0 && Cs > 0 && action == :CBA
-        return h.p[action][:, As, Bs, Cs]
+        return (h.w4[action][:, As, Bs, Cs] .+ g.alpha / g.n_id^4) / 
+               (h.w3[action][As, Bs, Cs] + g.alpha / g.n_id^3)
     else
         warning("Parent don't exist")
     end
 end
 
-function getchild1(h, action, Ps, As, Bs=0)
+function getchild1(g, h, action, Ps, As, Bs=0)
     if action in (:Ae, :eA, :Aee, :eAe, :eeA)
-        return h.c1[action][:, Ps, As]
+        return (h.w3[action][:, Ps, As] .+ g.alpha / g.n_id^3) / 
+               (h.w2[action][Ps, As] + g.alpha / g.n_id^2)
     elseif Bs > 0 && action in (:BAe, :BeA, :eBA)
-        return h.c1[action][:, Ps, As, Bs]
+        return (h.w4[action][:, Ps, As, Bs] .+ g.alpha / g.n_id^4) / 
+               (h.w3[action][Ps, As, Bs] + g.alpha / g.n_id^3)
     else
         warning("Child1 don't exist")
     end
 end
 
-function getchild2(h, action, C1s, Ps, As)
+function getchild2(g, h, action, C1s, Ps, As)
     if action in (:Aee, :eAe, :eeA)
-        return h.c2[action][:, C1s, Ps, As]
+        return (h.w4[action][:, C1s, Ps, As] .+ g.alpha / g.n_id^4) / 
+               (h.w3[action][C1s, Ps, As] + g.alpha / g.n_id^3)
     else
         warning("Child2 don't exist")
     end
 end
 
-function getsym(h::BUHeuristics, sym)
-    return h.sym[sym] * h.tot / h.obs
+function getsym(g, h::BUHeuristics, sym)
+    # return h.sym[sym] * h.tot / h.obs
+    return (h.sym1[sym] + g.alpha / g.n_id) / (h.obs + g.alpha / g.n_id * (g.n_tr - g.n_cn))
 end
 
 function get_prob(h::BUHeuristics, sym, in=0, out=0)
@@ -213,43 +202,65 @@ function get_nul_left(h::BUHeuristics, g::GrammarEx, sym, right=0)
                       g.h.p_l[:, sym]' * h.nul
 end
 
-function count_A!(h, p, l, nl)
+function count!(h, name, idx, w)
+    if length(idx) == 1
+        h.w1[name][idx[1]] += w
+        # h.w0[name] += w
+    elseif length(idx) == 2
+        h.w2[name][idx...] += w
+        h.w1[name][idx[2]] += w
+        # h.w0[name] += w
+    elseif length(idx) == 3
+        h.w3[name][idx...] += w
+        h.w2[name][idx[2], idx[3]] += w
+        h.w1[name][idx[3]] += w
+        # h.w0[name] += w
+    elseif length(idx) == 4
+        h.w4[name][idx...] += w
+        h.w3[name][idx[2], idx[3], idx[4]] += w
+        h.w2[name][idx[3], idx[4]] += w
+        h.w1[name][idx[4]] += w
+        # h.w0[name] += w
+    end
+end
+
+function count_A!(h, p, l, nl, w)
     if !nl
-        h.w[:A][p, l] += h.decay
+        count!(h, :A, (p, l), w)
     end
 end
 
-function count_BA!(h, p, l, nl, r, nr)
+function count_BA!(h, p, l, nl, r, nr, w)
     if nl && !nr
-        h.w[:eA][l, p, r] += h.decay
+        count!(h, :eA, (l, p, r), w)
     elseif !nl && nr
-        h.w[:Ae][r, p, l] += h.decay
+        count!(h, :Ae, (r, p, l), w)
     elseif !nl && !nr
-        h.w[:BA][p, r, l] += h.decay
-        h.w[:Az][r, p, l] += h.decay
+        count!(h, :BA, (p, r, l), w)
+        count!(h, :Az, (r, p, l), w)
     end
 end
 
-function count_CBA!(h, p, l, nl, r, nr, d, nd)
+function count_CBA!(h, p, l, nl, r, nr, d, nd, w)
     if nl && nr && !nd
-        h.w[:eeA][r, l, p, d] += h.decay
+        count!(h, :eeA, (r, l, p, d), w)
     elseif nl && !nr && nd
-        h.w[:eAe][d, l, p, r] += h.decay
+        count!(h, :eAe, (d, l, p, r), w)
     elseif !nl && nr && nd
-        h.w[:Aee][d, r, p, l] += h.decay
+        count!(h, :Aee, (d, r, p, l), w)
     elseif nl && !nr && !nd
-        h.w[:eAz][d, l, p, r] += h.decay
-        h.w[:eBA][l, p, d, r] += h.decay
+        count!(h, :eAz, (d, l, p, r), w)
+        count!(h, :eBA, (l, p, d, r), w)
     elseif !nl && nr && !nd
-        h.w[:Aez][d, r, p, l] += h.decay
-        h.w[:BeA][r, p, d, l] += h.decay
+        count!(h, :Aez, (d, r, p, l), w)
+        count!(h, :BeA, (r, p, d, l), w)
     elseif !nl && !nr && nd
-        h.w[:Aze][d, r, p, l] += h.decay
-        h.w[:BAe][d, p, r, l] += h.decay
+        count!(h, :Aze, (d, r, p, l), w)
+        count!(h, :BAe, (d, p, r, l), w)
     elseif !nl && !nr && !nd
-        h.w[:Azz][d, r, p, l] += h.decay
-        h.w[:BAz][d, p, r, l] += h.decay
-        h.w[:CBA][p, d, r, l] += h.decay
+        count!(h, :Azz, (d, r, p, l), w)
+        count!(h, :BAz, (d, p, r, l), w)
+        count!(h, :CBA, (p, d, r, l), w)
     end
 end
 
@@ -264,7 +275,7 @@ function simulate!(h::BUHeuristics, sym::Int, input::Int, g::GrammarEx)
         if type == U
             output = output_left
             isnul = isnul_left
-            count_A!(h, sym, left, isnul_left)
+            count_A!(h, sym, left, isnul_left, h.decay)
         else
             right, _ = sample(g.h.p_right[:, left, sym])
             if type in (Ll, Lr, Llr, Lrl)
@@ -289,9 +300,9 @@ function simulate!(h::BUHeuristics, sym::Int, input::Int, g::GrammarEx)
                 isnul = isnul_left && isnul_right && isnul_dynam
             end
             if type in (Ll, Lr, Pl, Pr)
-                count_BA!(h, sym, left, isnul_left, right, isnul_right)
+                count_BA!(h, sym, left, isnul_left, right, isnul_right, h.decay)
             else
-                count_CBA!(h, sym, left, isnul_left, right, isnul_right, dynam, isnul_dynam)
+                count_CBA!(h, sym, left, isnul_left, right, isnul_right, dynam, isnul_dynam, h.decay)
             end
         end
     elseif type == Fn
@@ -333,7 +344,6 @@ function learn_from_grammar(g::GrammarEx, n)
         decay!(h)
         simulate!(h, 1, 1, g)
     end
-    compile!(h, g)
     return h
 end
 
@@ -366,9 +376,9 @@ function learn_from_dataset(g::GrammarEx, n)
     return h
 end
 
-g = test_grammar1()
-h = learn_from_grammar(g, 10000)
-println("finish")
+# g = test_grammar1()
+# h = learn_from_grammar(g, 10000)
+# println("finish")
 
 # using LinearAlgebra: norm
 # g = test_grammar3()
