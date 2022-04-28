@@ -46,11 +46,20 @@ false Id
 """
 
 # Random.seed!(1)
-gm = init_grammar(rules2)
+gm = init_grammar(rules3)
 data = generate_sentence(gm)
 println("Data: $data")
 obs = getobservation(gm, data)
 prs = Parser(gm, 10)
-pf = ParticleFilter(10, obs)
-ps = simulate(pf, prs)
+for i in 1:10
+    println("trying particle filter $i")
+    pf = ParticleFilter(2, obs)
+    ps = simulate(pf, prs)
+    if !isnothing(ps)
+        println("particle filter succeeds, now starting conditional particle filter")
+        cpf = ConditionalParticleFilter(2, obs) 
+        ps = simulate(cpf, sample(ps))
+        break
+    end
+end
 println("Finish")

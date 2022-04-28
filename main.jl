@@ -652,8 +652,8 @@ Return a particle system is succeed. Otherwise return nothing"
 function simulate(pf::ParticleFilter, item::ParticleItem)
     # use item as seed to generate a particle system
     ps = ParticleSystem(pf.num_particles, item)
-    # go one more step after the last observation
     ess_log = Vector{Float}()
+    # go one more step after the last observation
     for step in 1:length(pf.observations) + 1
         new_ps = ParticleSystem{typeof(item)}()
         # draw new particles independently
@@ -677,9 +677,56 @@ end
 
 "Conditional Particle Filter"
 struct ConditionalParticleFilter <: AbstractParticleFilter
+    num_particles::Int
+    observations::Vector{Observation}
 end
 
-function simulate(cpf::ConditionalParticleFilter)
+function get_trajectory(ptl::Particle)
+    trajectory = Vector{Particle}()
+    while !isnothing(ptl)
+        push!(trajectory, ptl)
+        ptl = ptl.ancestor
+    end
+    return reverse(trajectory)
+end
+
+"Run conditional particle filter with a particle for conditioning.
+Return nothing is the particle have a mismatch trajectory length.
+Otherwise return a particle system with its last particle being the input one." 
+function simulate(pf::ConditionalParticleFilter, ptl::Particle)
+    # get the whole trajectory of ptl and check length
+    ptl_trajectory = get_trajectory(ptl)
+    if length(ptl_trajectory) != length(pf.observations) + 2
+        return nothing
+    end
+    # initialize a particle system and append the conditioning particle
+    ps = ParticleSystem(pf.num_particles - 1, ptl.item)
+    push!(ps, ptl_trajectory[1])
+    ess_log = Vector{Float}()
+    # go one more step after the last observation
+    for step in 1:length(pf.observations) + 1
+        new_ps = ParticleSystem{typeof(ptl.item)}()
+        # draw new particles independently, but one less
+        for _ in 1:pf.num_particles - 1
+            particle = sample(ps) # this will never fail
+            # use dummy obs = 0 for the last step
+            obs = step <= length(pf.observations) ? pf.observations[step] : 0
+            new_particle = simulate(particle, obs)
+            push!(new_ps, new_particle)
+        end
+        push!(new_ps, ptl_trajectory[step + 1]) # add the conditioning particle
+        ps = new_ps
+        push!(ess_log, effective_sample_size(ps))
+        # printstatus(ps)
+    end
+    println("ESS Trace: $ess_log")
+    return ps
+end
+
+"Conditional Particle Filter with ancester sampling"
+struct ConditionalParticleFilterAS <: AbstractParticleFilter
+    num_particles::Int
+    observations::Vector{Observation}
 end
 
 "Abstract Particle Gibbs"
@@ -687,13 +734,23 @@ abstract type AbstractParticleGibbs end
 
 "Particle Gibbs"
 struct ParticleGibbs <: AbstractParticleGibbs
-    particlefilter::ParticleFilter
+    ptlfilter::ParticleFilter
+    condptlfilter::ConditionalParticleFilter
 end
 
 "Particle Gibbs with ancester sampling"
 struct ParticleGibbsAS <: AbstractParticleGibbs
-    particlefilter::AbstractParticleFilter
+    ptlfilter::ParticleFilter
+    condptlfilterAS::ConditionalParticleFilterAS
 end
 
-function simulate(pgas::ParticleGibbsAS)
+"Particle Gibbs.
+First run a standard particle filter until it succeeds.
+Then sample one particle to run the conditional particle filter"
+function simulate(pg::ParticleGibbs, item::ParticleItem)
+    ps = simulate(pg.ptlfilter, item)
+    if !isnothing(ps)
+        particle_record = sample(ps)
+        simulate(pg.condptlfilter, particle_record)
+    end
 end
