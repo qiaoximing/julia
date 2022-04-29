@@ -10,6 +10,13 @@ const Float = Float32
 "Observations must be Int"
 const Observation = Int
 
+"Data must be string"
+const Data = String
+
+"Dataset as a vector of Data
+Change it later to support curriculum."
+const Dataset = Vector{Data}
+
 "A random Int for observation sampling"
 const ObX = 2814746717
 
@@ -22,7 +29,7 @@ const Cm = (Sl, Sr, Pl, Pr, Slr, Srl, Plr, Prl)
 "Dynamic Functional Grammar.
 Weight array organization:
 - Rule weights, Fn weights, Cn weights share the array"
-struct DFGrammar 
+struct DFGrammar
     nodenum::NTuple # number of nodes in type Cm, Fn, Cn, Id, Ob
     nodecumsum::NTuple # cumsum of nodenum (for indexing)
     nodetype::Vector{NodeType} # type of nodes
@@ -159,9 +166,24 @@ function init_grammar(rules::AbstractString, alpha=0)
 end
 
 "Initialize empty grammar given number of nodes in each type,
-alphabet of observations, and grammar hyperparameter"
-function init_grammar(nodenum, alphabet, alpha)
-    
+alphabet of observations, and grammar hyperparameter.
+Nodenum format: Sl Sr Pl Pr Slr Srl Plr Prl Fn Cn Id"
+function init_grammar(nums::Tuple, alphabet::String, alpha)
+    if length(nums) != 11 return nothing end
+    nodenum = (sum(nums[1:length(Cm)]), nums[length(Cm)+1:length(Cm)+3]..., length(alphabet))
+    csum = cumsum(nodenum)
+    nodetype = zeros(Int, csum[end])
+    for n in cumsum(nums) nodetype[n+1:end] .+= 1 end
+    nodetype = NodeType.(nodetype)
+    label_initials = ["S", "F", "C", "I"]
+    label = [label_initials[i] * string(j) for i in 1:4 for j in 1:nodenum[i]]
+    append!(label, [string(char) for char in alphabet])
+    labelindex = Dict(reverse.(enumerate(label)))
+    weight3d = zeros(Float, csum[end], csum[end], csum[2])
+    weight2d = zeros(Float, csum[end], csum[3])
+    weight1d = zeros(Float, csum[3])
+    return DFGrammar(nodenum, csum, nodetype, label, labelindex, alpha,
+                     weight3d, weight2d, weight1d)
 end
 
 "Get node type from grammar. 
@@ -194,42 +216,48 @@ function distr_right(gm::DFGrammar, sym, left)
     return distr
 end
 
-"Unnormalized probabilistic distribution"
+"Unnormalized probabilistic distribution with optional smoothing"
 struct Distribution{T<:Real}
     weight::AbstractArray{T} # a view or an array
-    sum::T # sum of weights and biases
-    bias::T # add bias to weights during sampling, used for smoothing
+    sum::T # sum of weights excluding bias
+    bias::T # add bias to weights for smoothing
+    totalsum::T # sum of weights and bias
 end
 
-"Initialize a distribution from weights and calculate sum"
+"Initialize a distribution from weights and calculate sum if not provided.
+Note: cannot use Distribution(weight, sum). Use Distribution(weight, sum, 0) instead"
+function Distribution(weight::AbstractArray{T}, sum::T, bias::T) where {T}
+    return Distribution(weight, sum, bias, sum + length(weight) * bias)
+end
+Distribution(weight::AbstractArray{T}, bias::T) where {T} = Distribution(weight, sum(weight), bias)
 Distribution(weight::AbstractArray{T}) where {T} = Distribution(weight, sum(weight), T(0))
 
 "Return a zero distribution"
-zerodistr(T, size) = Distribution{T}(zeros(T, size), T(0), T(0))
+zerodistr(T, size, bias=0) = Distribution(zeros(T, size), T(0), T(bias))
 
 "Return a one-hot distribution with 1 at idx"
-function onehotdistr(T, size, idx)
+function onehotdistr(T, size, idx, bias=0)
     weight = zeros(T, size)
     weight[idx] = 1
-    return Distribution{T}(weight, T(1), T(0))
+    return Distribution(weight, T(1), T(bias))
 end
 
 "Get the normalized probability at location idx.
-Might divide by zero"
+Might get NaN"
 function getprobability(distr::Distribution, idx)
-    return (distr.weight[idx] + distr.bias) / distr.sum
+    return (distr.weight[idx] + distr.bias) / distr.totalsum
 end
 
 "Sample from a distribution and return index.
 Return zero for zero distribution."
 function sample(distr::Distribution)
-    if distr.sum == 0
+    if distr.totalsum == 0
         # warning("sample from a zero distribution")
         return 0
     end
-    r = rand() * distr.sum
+    r = rand() * distr.totalsum
     for idx in eachindex(distr.weight)
-        r -= distr.weight[idx] + distr.bias
+        r -= (distr.weight[idx] + distr.bias)
         if r < 0
             return idx
         end
@@ -259,7 +287,6 @@ const ParseStack = LinkedList{Node}
 "Create a new stack"
 newstack(pstate::Node) = list(pstate)
 newstack() = nil(Node)
-# isempty(pst::ParseStack) = length(pst) == 0
 
 "Things can be used in a particle filter"
 abstract type ParticleItem end
@@ -374,7 +401,9 @@ function parse_step!(prs::Parser, root::Node, obs::Observation)
             left_child_processed = true
         end
         # setup right child distribution, but don't sample it yet
-        setdistr!(prs, right_child.sym, distr_right(prs.grammar, sym, left_val))
+        if weight_update > 0
+            setdistr!(prs, right_child.sym, distr_right(prs.grammar, sym, left_val))
+        end
         # update stack
         if !isnothing(dynam_child) new_stack = cons(dynam_child, new_stack) end
         new_stack = cons(right_child, new_stack)
@@ -422,21 +451,24 @@ function parse_create_children!(prs::Parser, root, type)
     return left_child, right_child, dynam_child
 end
 
+"get a truncated distribution of observations"
+function distr_obs(prs::Parser, idx)
+    distr = prs.distr[idx]
+    range_Ob = range(prs.grammar, Ob)
+    obs_weight = view(distr.weight, range_Ob)
+    return Distribution(obs_weight, distr.bias)
+end
+
 "get the total probability of generating an observation"
 function obsprobability(prs::Parser, idx)
-    distr = prs.distr[idx]
-    return (sum(distr.weight[range(prs.grammar, Ob)]) + 
-            size(prs.grammar, Ob) * distr.bias) / distr.sum
+    return distr_obs(prs, idx).totalsum
 end
 
 "sample an ObX to a value.
 Use a truncated distribution, then add back the offset"
 function sampleobs!(prs::Parser, idx)
-    distr = prs.distr[idx]
-    range_Ob = range(prs.grammar, Ob)
-    obs_weight = view(distr.weight, range_Ob)
-    obs_distr = Distribution(obs_weight, sum(obs_weight), distr.bias)
-    prs.value[idx] = sample(obs_distr) + first(range_Ob) - 1
+    obs_distr = distr_obs(prs, idx)
+    prs.value[idx] = sample(obs_distr) + first(range(prs.grammar, Ob)) - 1
     return prs.value[idx]
 end
 
@@ -494,8 +526,14 @@ function initialize(prs::Parser)
     )
 end
 
-function getobservation(gm::DFGrammar, data::AbstractString)
-    return [gm.labelindex[string(char)] for char in data]
+function getobservation(gm::DFGrammar, str::AbstractString)
+    return [gm.labelindex[string(char)] for char in str]
+end
+function getobservation(gm::DFGrammar, char::Char)
+    return gm.labelindex[string(char)]
+end
+function getobservation(prs::Parser, data)
+    return getobservation(prs.grammar, data)
 end
 
 #=======
@@ -586,7 +624,8 @@ getweight(ptl::Particle) = ptl.weight
 The old particle becomes the ancestor."
 function simulate(ptl::Particle, obs::Observation)
     new_item, weight_update = simulate(ptl.item, obs)
-    new_weight = ptl.weight * weight_update
+    # new_weight = ptl.weight * weight_update
+    new_weight = weight_update # the old weight is gone due to resampling
     return Particle(new_item, new_weight, ptl)
 end
 
@@ -629,14 +668,12 @@ function printstatus(_::Nothing)
     println("Nothing to print")
 end
 
-"Abstract Particle Filter"
-abstract type AbstractParticleFilter end
-
 "Particle Filter"
-struct ParticleFilter <: AbstractParticleFilter
+struct ParticleFilter
     num_particles::Int
-    observations::Vector{Observation}
+    log::Dict
 end
+ParticleFilter(n) = ParticleFilter(n, Dict())
 
 "Sample one particle from the particle system.
 Return nothing if all particles have zero weight."
@@ -647,14 +684,21 @@ function sample(ps::ParticleSystem)
     return getparticle(ps, idx)
 end
 
+"Sample N particle from the particle system with replacement.
+Return nothing if all particles have zero weight."
+function sample_n(ps::ParticleSystem, n::Int)
+    ret = [sample(ps) for _ in 1:n]
+    return nothing in ret ? nothing : ret
+end
+
 "Run the particle filter with a seed item.
 Return a particle system is succeed. Otherwise return nothing"
-function simulate(pf::ParticleFilter, item::ParticleItem)
+function simulate(pf::ParticleFilter, item::ParticleItem, data::Data)
     # use item as seed to generate a particle system
     ps = ParticleSystem(pf.num_particles, item)
-    ess_log = Vector{Float}()
+    pf.log["ESS"] = Vector{Float}()
     # go one more step after the last observation
-    for step in 1:length(pf.observations) + 1
+    for step in 1:length(data) + 1
         new_ps = ParticleSystem{typeof(item)}()
         # draw new particles independently
         for _ in 1:pf.num_particles
@@ -663,23 +707,24 @@ function simulate(pf::ParticleFilter, item::ParticleItem)
                 return nothing
             end
             # use dummy obs = 0 for the last step
-            obs = step <= length(pf.observations) ? pf.observations[step] : 0
+            obs = step <= length(data) ? getobservation(item, data[step]) : 0
             new_particle = simulate(particle, obs)
             push!(new_ps, new_particle)
         end
         ps = new_ps
-        push!(ess_log, effective_sample_size(ps))
+        push!(pf.log["ESS"], effective_sample_size(ps))
         # printstatus(ps)
     end
-    println("ESS Trace: $ess_log")
     return ps
 end
 
 "Conditional Particle Filter"
-struct ConditionalParticleFilter <: AbstractParticleFilter
-    num_particles::Int
-    observations::Vector{Observation}
+struct ConditionalParticleFilter
+    num_particles::Int # total number of particles
+    num_conditions::Int # number of conditional particles
+    log::Dict
 end
+ConditionalParticleFilter(np, nc) = ConditionalParticleFilter(np, nc, Dict())
 
 function get_trajectory(ptl::Particle)
     trajectory = Vector{Particle}()
@@ -690,67 +735,172 @@ function get_trajectory(ptl::Particle)
     return reverse(trajectory)
 end
 
-"Run conditional particle filter with a particle for conditioning.
+"Run conditional particle filter with an input particle for conditioning.
+A special case of conditional particle filter with ancestor sampling.
 Return nothing is the particle have a mismatch trajectory length.
 Otherwise return a particle system with its last particle being the input one." 
-function simulate(pf::ConditionalParticleFilter, ptl::Particle)
-    # get the whole trajectory of ptl and check length
-    ptl_trajectory = get_trajectory(ptl)
-    if length(ptl_trajectory) != length(pf.observations) + 2
+function simulate(pf::ConditionalParticleFilter, ptls::Vector{Particle{T}}, data::Data) where T
+    pf_with_as = ConditionalParticleFilterAS(
+        pf.num_particles, pf.num_conditions, 0, pf.log)
+    simulate(pf_with_as, ptls, data)
+end
+
+"Conditional Particle Filter with ancestor sampling"
+struct ConditionalParticleFilterAS
+    num_particles::Int # total number of particles
+    num_conditions::Int # number of conditional particles
+    eta::Float # probability of performing ancetor sampling
+    log::Dict
+end
+ConditionalParticleFilterAS(np, nc, eta) = ConditionalParticleFilterAS(np, nc, eta, Dict())
+
+"Run conditional particle filter with ancestor sampling (AS), 
+using an input particle for conditioning.
+In each step, resample the ancestor of the input particle with probability Eta
+This is done by creating a new chain of particles, without mutating the input one.
+Return nothing is the input particle have a mismatch trajectory length.
+Otherwise return a particle system with its last particle being the input one." 
+function simulate(pf::ConditionalParticleFilterAS, ptls::Vector{Particle{T}}, data::Data) where T
+    # get the whole trajectorys of ptls and check length
+    length(ptls) == pf.num_conditions || return nothing
+    ptl_trajectorys = get_trajectory.(ptls)
+    if any([length(traj) != length(data) + 2 for traj in ptl_trajectorys])
         return nothing
     end
     # initialize a particle system and append the conditioning particle
-    ps = ParticleSystem(pf.num_particles - 1, ptl.item)
-    push!(ps, ptl_trajectory[1])
-    ess_log = Vector{Float}()
+    ps = ParticleSystem(pf.num_particles - pf.num_conditions, ptls[1].item)
+    push!(ps, first.(ptl_trajectorys)...)
+    pf.log["ESS"] = Vector{Float}()
     # go one more step after the last observation
-    for step in 1:length(pf.observations) + 1
-        new_ps = ParticleSystem{typeof(ptl.item)}()
-        # draw new particles independently, but one less
-        for _ in 1:pf.num_particles - 1
-            particle = sample(ps) # this will never fail
+    for step in 1:length(data) + 1
+        new_ps = ParticleSystem{T}()
+        # draw new particles independently, but excluding the last few
+        for _ in 1:pf.num_particles - pf.num_conditions
+            ptl = sample(ps) # this will never fail
             # use dummy obs = 0 for the last step
-            obs = step <= length(pf.observations) ? pf.observations[step] : 0
-            new_particle = simulate(particle, obs)
-            push!(new_ps, new_particle)
+            obs = step <= length(data) ? getobservation(ptl.item, data[step]) : 0
+            new_ptl = simulate(ptl, obs)
+            push!(new_ps, new_ptl)
         end
-        push!(new_ps, ptl_trajectory[step + 1]) # add the conditioning particle
+        # add the conditioning particle, but with resampled ancestor
+        for traj in ptl_trajectorys
+            new_ptl = traj[step + 1]
+            if rand() < pf.eta
+                new_ptl = ancestorsample(new_ptl, ps) # use the old ps
+            end
+            push!(new_ps, new_ptl)
+        end
         ps = new_ps
-        push!(ess_log, effective_sample_size(ps))
+        push!(pf.log["ESS"], effective_sample_size(ps))
         # printstatus(ps)
     end
-    println("ESS Trace: $ess_log")
     return ps
 end
 
-"Conditional Particle Filter with ancester sampling"
-struct ConditionalParticleFilterAS <: AbstractParticleFilter
-    num_particles::Int
-    observations::Vector{Observation}
+function ancestorsample(ptl::Particle, ps::ParticleSystem)
+    return ptl
 end
 
-"Abstract Particle Gibbs"
-abstract type AbstractParticleGibbs end
 
-"Particle Gibbs"
-struct ParticleGibbs <: AbstractParticleGibbs
+"Particle EM"
+struct ParticleEM
     ptlfilter::ParticleFilter
     condptlfilter::ConditionalParticleFilter
+    dataset::Dataset
+    epochs::Int
+    gamma::Float
+    memory::Vector{Any}
+    log::Dict
+end
+"Initialize particle EM with empty memory"
+function ParticleEM(ptlfilter, condptlfilter, dataset, epochs, gamma)
+    return ParticleEM(ptlfilter, condptlfilter, dataset, epochs, gamma,
+        repeat(Any[nothing], length(dataset)), Dict())
 end
 
-"Particle Gibbs with ancester sampling"
-struct ParticleGibbsAS <: AbstractParticleGibbs
+"Particle EM with ancestor sampling"
+struct ParticleEMAS
     ptlfilter::ParticleFilter
     condptlfilterAS::ConditionalParticleFilterAS
 end
 
-"Particle Gibbs.
-First run a standard particle filter until it succeeds.
-Then sample one particle to run the conditional particle filter"
-function simulate(pg::ParticleGibbs, item::ParticleItem)
-    ps = simulate(pg.ptlfilter, item)
-    if !isnothing(ps)
-        particle_record = sample(ps)
-        simulate(pg.condptlfilter, particle_record)
+"Run particle EM on a dataset.
+For each data, run a standard particle filter until it succeeds, memorize some samples.
+The following runs will use conditional particle filter on these samples, and update them."
+function simulate(pe::ParticleEM, item::ParticleItem)
+    pe.log["Q"] = Vector{Float}()
+    for epoch in 1:pe.epochs
+        for (data_id, data) in enumerate(pe.dataset)
+            if isnothing(pe.memory[data_id])
+                ps = simulate(pe.ptlfilter, item, data)
+            else
+                ps = simulate(pe.condptlfilter, pe.memory[data_id], data)
+            end
+            if !isnothing(ps)
+                memory_update!(pe, data_id, ps)
+                model_update!(pe, item, ps)
+            end
+        end
     end
+end
+
+"Update the memory at data_id based on a particle system"
+function memory_update!(pe::ParticleEM, data_id::Int, ps::ParticleSystem)
+    pe.memory[data_id] = sample_n(ps, pe.condptlfilter.num_conditions)
+end
+
+"Update model parameters using a particle system"
+function model_update!(pe::ParticleEM, item::Parser, ps::ParticleSystem)
+    gm = item.grammar
+    # grammar weight decay
+    grammar_decay!(gm, pe.gamma)
+    ps_weight_total = sum([p.weight for p in ps])
+    for ptl in ps
+        # get normalized particle weight
+        ptl_weight = ptl.weight / ps_weight_total
+        # grammar weight update
+        if ptl_weight > 0
+            tree = gettree(ptl.item)
+            # printtree(tree, gm)
+            grammar_update!(gm, tree, ptl_weight)
+        end
+    end
+end
+
+"Decay grammar weights by w"
+function grammar_decay!(gm::DFGrammar, w::Float)
+    gm.weight3d .*= 1 - w
+    gm.weight2d .*= 1 - w
+    gm.weight1d .*= 1 - w
+end
+
+"Update grammar from a parse tree.
+Traverse the tree to collect patterns.
+Update the pattern weights by w."
+function grammar_update!(gm::DFGrammar, t::Tree, w::Float)
+    sym, input, output = t.node.sym, t.node.input, t.node.output
+    type = getnodetype(gm, sym)
+    if type == Fn
+        gm.weight3d[output, input, sym] += w
+        gm.weight2d[input, sym] += w
+        gm.weight1d[sym] += w
+    elseif type == Cn
+        gm.weight2d[output, sym] += w
+        gm.weight1d[sym] += w
+    elseif type == Id || type == Ob
+        # do nothing
+    else
+        gm.weight3d[t.right.node.sym, t.left.node.sym, sym] += w
+        gm.weight2d[t.left.node.sym, sym] += w
+        gm.weight1d[sym] += w
+    end
+    # recursive update
+    t.left isa Tree && grammar_update!(gm, t.left, w)
+    t.right isa Tree && grammar_update!(gm, t.right, w)
+    t.dynam isa Tree && grammar_update!(gm, t.dynam, w)
+end
+
+"print the logs"
+function summarize(pe::ParticleEM)
+    println(pe.log["Q"])
 end

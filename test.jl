@@ -1,11 +1,21 @@
 include("main.jl")
 using Random
 
+const LineBreak = "="^60
+
 rules1 = """
 S Sr -> c A 1
 A Sr -> B C 1
 B Plr -> I I 1
 C Plr -> z I 1
+c Cn -> x 1 | y 1
+I Id
+"""
+
+rules1x = """
+S Sr -> A B 1
+A Slr -> c I 1
+B Plr -> z I 1
 c Cn -> x 1 | y 1
 I Id
 """
@@ -45,21 +55,39 @@ true Id
 false Id
 """
 
-# Random.seed!(1)
-gm = init_grammar(rules3)
-data = generate_sentence(gm)
-println("Data: $data")
-obs = getobservation(gm, data)
-prs = Parser(gm, 10)
-for i in 1:10
-    println("trying particle filter $i")
-    pf = ParticleFilter(2, obs)
-    ps = simulate(pf, prs)
-    if !isnothing(ps)
-        println("particle filter succeeds, now starting conditional particle filter")
-        cpf = ConditionalParticleFilter(2, obs) 
-        ps = simulate(cpf, sample(ps))
-        break
+"Test the parser on simple grammars"
+function parser_test()
+    # Random.seed!(1)
+    gm = init_grammar(rules3)
+    data = generate_sentence(gm)
+    println("Data: $data")
+    prs = Parser(gm, 10)
+    for i in 1:10
+        println("trying particle filter $i")
+        pf = ParticleFilter(2)
+        ps = simulate(pf, prs, data)
+        if !isnothing(ps)
+            println("particle filter succeeds, now starting conditional particle filter")
+            cpf = ConditionalParticleFilter(2, 1) 
+            ps = simulate(cpf, sample_n(ps, cpf.num_conditions), data)
+            break
+        end
     end
+    println(LineBreak)
 end
-println("Finish")
+# parser_test()
+
+"Test grammar learning limited to CFG"
+function cfg_learning_test()
+    gm = init_grammar((4,0,0,0,0,0,0,0,0,0,1), "xyz", 0.1)
+    dict = ["xx", "yy", "z"]
+    dataset = [reduce(*, [rand(dict) for j in 1:2]) for i in 1:100]
+    prs = Parser(gm, 10)
+    pf = ParticleFilter(10)
+    cpf = ConditionalParticleFilter(10, 1)
+    pe = ParticleEM(pf, cpf, dataset, 100, 0.001)
+    simulate(pe, prs)
+    summarize(pe)
+    println(LineBreak)
+end
+cfg_learning_test()
