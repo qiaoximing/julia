@@ -3,6 +3,7 @@ This will be the main program
 Our current goal is to implement PGAS learning with TD parser
 =#
 using DataStructures
+using Plots
 
 "Set to Float32 or Float64"
 const Float = Float32
@@ -29,7 +30,7 @@ const Cm = (Sl, Sr, Pl, Pr, Slr, Srl, Plr, Prl)
 "Dynamic Functional Grammar.
 Weight array organization:
 - Rule weights, Fn weights, Cn weights share the array"
-struct DFGrammar
+mutable struct DFGrammar
     nodenum::NTuple # number of nodes in type Cm, Fn, Cn, Id, Ob
     nodecumsum::NTuple # cumsum of nodenum (for indexing)
     nodetype::Vector{NodeType} # type of nodes
@@ -106,10 +107,10 @@ Conventions:
 - Names not appeared on the left are Ob, and must have length 1"
 function init_grammar(rules::AbstractString, alpha=0)
     # parse rules as a list of tuples, set up label, nodetype and labelindex
-    label = Vector{String}()
-    label_extra = Vector{String}()
-    nodetype = Vector{NodeType}()
-    parsedrules = Vector{Tuple}()
+    label = String[]
+    label_extra = String[]
+    nodetype = NodeType[]
+    parsedrules = Tuple[]
     for rule in split(rules, "\n")
         if rule == "" continue end
         splits = split(rule, " -> ")
@@ -206,7 +207,8 @@ end
 
 "left child given symbol."
 function distr_left(gm::DFGrammar, sym)
-    distr = Distribution(view(gm.weight2d, :, sym), gm.weight1d[sym], gm.alpha)
+    bias = gm.alpha #* size(gm)
+    distr = Distribution(view(gm.weight2d, :, sym), gm.weight1d[sym], bias)
     return distr
 end
 
@@ -461,7 +463,7 @@ end
 
 "get the total probability of generating an observation"
 function obsprobability(prs::Parser, idx)
-    return distr_obs(prs, idx).totalsum
+    return distr_obs(prs, idx).totalsum / prs.distr[idx].totalsum
 end
 
 "sample an ObX to a value.
@@ -641,28 +643,39 @@ function printstatus(ptl::Particle)
 end
 
 "Particle system"
-const ParticleSystem{T} = Vector{Particle{T}}
+mutable struct ParticleSystem{T}
+    particles::Vector{Particle{T}}
+    loglikelihood::Float
+end
 
-"Generate a vector of particles, each with an unique item"
-ParticleSystem(n::Int, item) = [Particle(initialize(item)) for _=1:n]
+"Initialize a new particle system from item"
+ParticleSystem(n::Int, item) = 
+    ParticleSystem([Particle(initialize(item)) for _=1:n], Float(0))
+
+"Inherite loglikelihood from an old particle system, clean up the particles"
+ParticleSystem(ps::ParticleSystem{T}) where T = 
+    ParticleSystem(Particle{T}[], ps.loglikelihood)
 
 "Get particle weights and return as a vector"
-getweights(ps::ParticleSystem) = getweight.(ps)
+getweights(ps::ParticleSystem) = getweight.(ps.particles)
 
 "Get a particle by index.
 Return nothing if index=0"
-getparticle(ps::ParticleSystem, idx) = idx > 0 ? ps[idx] : nothing
+getparticle(ps::ParticleSystem, idx) = idx > 0 ? ps.particles[idx] : nothing
+
+"push a particle to a particle system"
+Base.push!(ps::ParticleSystem, ptl) = push!(ps.particles, ptl)
 
 "Effective sample size of a particle system"
 function effective_sample_size(ps::ParticleSystem)
-    weights = [p.weight for p in ps]
+    weights = getweights(ps)
     return sum(weights) ^ 2 / sum(weights .^ 2)
 end
 
 "Print the status of a particle system"
-function printstatus(ps::ParticleSystem)
+function printstatus(ps::ParticleSystem, temperature)
     println("ESS: ", effective_sample_size(ps))
-    printstatus(sample(ps))
+    printstatus(sample(ps, temperature))
 end
 function printstatus(_::Nothing)
     println("Nothing to print")
@@ -676,9 +689,10 @@ end
 ParticleFilter(n) = ParticleFilter(n, Dict())
 
 "Sample one particle from the particle system.
+Use temperature to control the sampling.
 Return nothing if all particles have zero weight."
-function sample(ps::ParticleSystem)
-    weights = getweights(ps)
+function sample(ps::ParticleSystem, temperature=1)
+    weights = getweights(ps) .^ (1 / Float(temperature))
     distr = Distribution(weights)
     idx = sample(distr)
     return getparticle(ps, idx)
@@ -696,10 +710,10 @@ Return a particle system is succeed. Otherwise return nothing"
 function simulate(pf::ParticleFilter, item::ParticleItem, data::Data)
     # use item as seed to generate a particle system
     ps = ParticleSystem(pf.num_particles, item)
-    pf.log["ESS"] = Vector{Float}()
+    pf.log["ESS"] = Float[]
     # go one more step after the last observation
     for step in 1:length(data) + 1
-        new_ps = ParticleSystem{typeof(item)}()
+        new_ps = ParticleSystem(ps)
         # draw new particles independently
         for _ in 1:pf.num_particles
             particle = sample(ps)
@@ -711,6 +725,7 @@ function simulate(pf::ParticleFilter, item::ParticleItem, data::Data)
             new_particle = simulate(particle, obs)
             push!(new_ps, new_particle)
         end
+        update_loglikelihood(new_ps)
         ps = new_ps
         push!(pf.log["ESS"], effective_sample_size(ps))
         # printstatus(ps)
@@ -727,7 +742,7 @@ end
 ConditionalParticleFilter(np, nc) = ConditionalParticleFilter(np, nc, Dict())
 
 function get_trajectory(ptl::Particle)
-    trajectory = Vector{Particle}()
+    trajectory = Particle[]
     while !isnothing(ptl)
         push!(trajectory, ptl)
         ptl = ptl.ancestor
@@ -768,17 +783,18 @@ function simulate(pf::ConditionalParticleFilterAS, ptls::Vector{Particle{T}}, da
         return nothing
     end
     # initialize a particle system and append the conditioning particle
-    ps = ParticleSystem(pf.num_particles - pf.num_conditions, ptls[1].item)
+    item = ptls[1].item
+    ps = ParticleSystem(pf.num_particles - pf.num_conditions, item)
     push!(ps, first.(ptl_trajectorys)...)
-    pf.log["ESS"] = Vector{Float}()
+    pf.log["ESS"] = Float[]
     # go one more step after the last observation
     for step in 1:length(data) + 1
-        new_ps = ParticleSystem{T}()
+        new_ps = ParticleSystem(ps)
         # draw new particles independently, but excluding the last few
         for _ in 1:pf.num_particles - pf.num_conditions
             ptl = sample(ps) # this will never fail
             # use dummy obs = 0 for the last step
-            obs = step <= length(data) ? getobservation(ptl.item, data[step]) : 0
+            obs = step <= length(data) ? getobservation(item, data[step]) : 0
             new_ptl = simulate(ptl, obs)
             push!(new_ps, new_ptl)
         end
@@ -790,6 +806,7 @@ function simulate(pf::ConditionalParticleFilterAS, ptls::Vector{Particle{T}}, da
             end
             push!(new_ps, new_ptl)
         end
+        update_loglikelihood(new_ps)
         ps = new_ps
         push!(pf.log["ESS"], effective_sample_size(ps))
         # printstatus(ps)
@@ -828,7 +845,7 @@ end
 For each data, run a standard particle filter until it succeeds, memorize some samples.
 The following runs will use conditional particle filter on these samples, and update them."
 function simulate(pe::ParticleEM, item::ParticleItem)
-    pe.log["Q"] = Vector{Float}()
+    pe.log["NLL"] = Float[]
     for epoch in 1:pe.epochs
         for (data_id, data) in enumerate(pe.dataset)
             if isnothing(pe.memory[data_id])
@@ -839,9 +856,19 @@ function simulate(pe::ParticleEM, item::ParticleItem)
             if !isnothing(ps)
                 memory_update!(pe, data_id, ps)
                 model_update!(pe, item, ps)
+                nll(ps) < Inf && push!(pe.log["NLL"], nll(ps))
             end
         end
     end
+end
+
+"negative log likelihood of a particle system"
+nll(ps::ParticleSystem) = -ps.loglikelihood
+
+"Update the log likelihood of a particle system based on the new observations.
+Become -Inf if all particle fails."
+function update_loglikelihood(ps::ParticleSystem)
+    ps.loglikelihood += log(sum(getweights(ps)) / length(getweights(ps)))
 end
 
 "Update the memory at data_id based on a particle system"
@@ -854,8 +881,8 @@ function model_update!(pe::ParticleEM, item::Parser, ps::ParticleSystem)
     gm = item.grammar
     # grammar weight decay
     grammar_decay!(gm, pe.gamma)
-    ps_weight_total = sum([p.weight for p in ps])
-    for ptl in ps
+    ps_weight_total = sum(getweights(ps))
+    for ptl in ps.particles
         # get normalized particle weight
         ptl_weight = ptl.weight / ps_weight_total
         # grammar weight update
@@ -900,7 +927,26 @@ function grammar_update!(gm::DFGrammar, t::Tree, w::Float)
     t.dynam isa Tree && grammar_update!(gm, t.dynam, w)
 end
 
-"print the logs"
-function summarize(pe::ParticleEM)
-    println(pe.log["Q"])
+"smoothen a vector with exponential decay"
+function smooth(xs, rate=0.99)
+    length(xs) == 0 && return xs
+    y = xs[1]
+    ys = [y]
+    for x in xs
+        y = rate * y + (1 - rate) * x
+        push!(ys, y)
+    end
+    return ys
+end
+
+"print the results"
+function summarize(pe::ParticleEM, prs::Parser, smooth_rate)
+    gm = prs.grammar
+    for data in pe.dataset[1:5]
+        ps = simulate(ParticleFilter(100), prs, data)
+        printstatus(ps, 0.1)
+    end
+    p1 = plot(smooth(pe.log["NLL"], smooth_rate))
+    p2 = histogram(filter(x->x>gm.alpha, reshape(gm.weight3d, :)), bins=10)
+    display(plot(p1, p2, layout=(2, 1)))
 end

@@ -79,7 +79,7 @@ end
 
 "Test grammar learning limited to CFG"
 function cfg_learning_test()
-    gm = init_grammar((4,0,0,0,0,0,0,0,0,0,1), "xyz", 0.1)
+    gm = init_grammar((4,0,0,0,0,0,0,0,0,0,1), "xyz", 1)
     dict = ["xx", "yy", "z"]
     dataset = [reduce(*, [rand(dict) for j in 1:2]) for i in 1:100]
     prs = Parser(gm, 10)
@@ -87,7 +87,7 @@ function cfg_learning_test()
     cpf = ConditionalParticleFilter(10, 1)
     pe = ParticleEM(pf, cpf, dataset, 100, 0.001)
     simulate(pe, prs)
-    summarize(pe)
+    summarize(pe, prs, 0.999)
     println(LineBreak)
 end
 cfg_learning_test()
