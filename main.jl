@@ -4,6 +4,7 @@ Our current goal is to implement PGAS learning with TD parser
 =#
 using DataStructures
 using Plots
+using ProgressMeter
 
 "Set to Float32 or Float64"
 const Float = Float32
@@ -147,29 +148,46 @@ function init_grammar(rules::AbstractString, alpha=0)
     weight3d = zeros(Float, csum[end], csum[end], csum[2])
     weight2d = zeros(Float, csum[end], csum[3])
     weight1d = zeros(Float, csum[3])
-    for (lhs_label, rhs_labels, weight) in parsedrules
-        lhs_idx = labelindex[lhs_label]
-        lhs_type = nodetype[lhs_idx]
-        if lhs_type == Cn
-            rhs_idx = labelindex[rhs_labels[1]]
-            weight2d[rhs_idx, lhs_idx] += weight
-            weight1d[lhs_idx] += weight
-        else
-            rhs_idx1 = labelindex[rhs_labels[1]]
-            rhs_idx2 = labelindex[rhs_labels[2]]
-            weight3d[rhs_idx2, rhs_idx1, lhs_idx] += weight
-            weight2d[rhs_idx1, lhs_idx] += weight
-            weight1d[lhs_idx] += weight
-        end
+    gm = DFGrammar(tuple(nodenum...), tuple(csum...), nodetype, label, labelindex, 
+        alpha, weight3d, weight2d, weight1d)
+    for rule in parsedrules
+        addrule!(gm, rule)
     end
-    return DFGrammar(tuple(nodenum...), tuple(csum...), nodetype, label, labelindex, 
-                     alpha, weight3d, weight2d, weight1d)
+    return gm
+end
+
+"Parse a single rule of formal LHS -> RHS... weight"
+function parserule(str::AbstractString)
+    splits = split(str, " -> ")
+    lhs_label = splits[1]
+    rhs_labels_and_weight = split(splits[2], " ")
+    rhs_labels = rhs_labels_and_weight[1:end-1]
+    weight = Base.parse(Float, rhs_labels_and_weight[end])
+    return (lhs_label, rhs_labels, weight)
+end
+
+"Update grammar weight given a rule"
+function addrule!(gm::DFGrammar, rule)
+    lhs_label, rhs_labels, weight = rule
+    lhs_idx = gm.labelindex[lhs_label]
+    lhs_type = gm.nodetype[lhs_idx]
+    if lhs_type == Cn
+        rhs_idx = gm.labelindex[rhs_labels[1]]
+        gm.weight2d[rhs_idx, lhs_idx] += weight
+        gm.weight1d[lhs_idx] += weight
+    else
+        rhs_idx1 = gm.labelindex[rhs_labels[1]]
+        rhs_idx2 = gm.labelindex[rhs_labels[2]]
+        gm.weight3d[rhs_idx2, rhs_idx1, lhs_idx] += weight
+        gm.weight2d[rhs_idx1, lhs_idx] += weight
+        gm.weight1d[lhs_idx] += weight
+    end
 end
 
 "Initialize empty grammar given number of nodes in each type,
 alphabet of observations, and grammar hyperparameter.
 Nodenum format: Sl Sr Pl Pr Slr Srl Plr Prl Fn Cn Id"
-function init_grammar(nums::Tuple, alphabet::String, alpha)
+function init_grammar(nums::Tuple, alphabet::String, alpha, weightrange=0.)
     if length(nums) != 11 return nothing end
     nodenum = (sum(nums[1:length(Cm)]), nums[length(Cm)+1:length(Cm)+3]..., length(alphabet))
     csum = cumsum(nodenum)
@@ -180,9 +198,10 @@ function init_grammar(nums::Tuple, alphabet::String, alpha)
     label = [label_initials[i] * string(j) for i in 1:4 for j in 1:nodenum[i]]
     append!(label, [string(char) for char in alphabet])
     labelindex = Dict(reverse.(enumerate(label)))
-    weight3d = zeros(Float, csum[end], csum[end], csum[2])
-    weight2d = zeros(Float, csum[end], csum[3])
-    weight1d = zeros(Float, csum[3])
+    weight3d = rand(Float, csum[end], csum[end], csum[2]) * weightrange
+    weight2d = hcat(sum(weight3d, dims=1)[1, :, :],
+                    rand(Float, csum[end], nodenum[3]) * weightrange)
+    weight1d = sum(weight2d, dims=1)[1, :]
     return DFGrammar(nodenum, csum, nodetype, label, labelindex, alpha,
                      weight3d, weight2d, weight1d)
 end
@@ -252,20 +271,48 @@ end
 
 "Sample from a distribution and return index.
 Return zero for zero distribution."
-function sample(distr::Distribution)
+function sample(distr::Distribution{T}) where T
     if distr.totalsum == 0
         # warning("sample from a zero distribution")
         return 0
     end
-    r = rand() * distr.totalsum
+    r = rand(T) * distr.totalsum
     for idx in eachindex(distr.weight)
-        r -= (distr.weight[idx] + distr.bias)
+        @inbounds r -= distr.weight[idx]
+        r -= distr.bias
         if r < 0
             return idx
         end
     end
     # this should occur with probability zero
     return 1
+end
+
+"sample n times from a distribution and return a vector index.
+Possible methods include :multinomial, :systematic"
+function sample_n(distr::Distribution{T}, n::Int, method::Symbol) where T
+    if method == :multinomial
+        return [sample(distr) for _ in 1:n]
+    elseif method == :systematic
+        nthsum = distr.totalsum / n
+        r = rand(T) * nthsum
+        result = Int[]
+        for idx in eachindex(distr.weight)
+            @inbounds r -= distr.weight[idx]
+            r -= distr.bias
+            while r < 0
+                push!(result, idx)
+                r += T(1) * nthsum
+            end
+        end
+        # this should occur with probability zero
+        while length(result) < n
+            push!(result, 1)
+        end
+        return result
+    else
+        return 0
+    end
 end
 
 #=======
@@ -521,7 +568,8 @@ function initialize(prs::Parser)
     return Parser(
         newstack(Node(1, 2, 3)),
         [1, 1, 0],
-        [distr, distr, nothing],
+        # [distr, distr, nothing],
+        [nothing, nothing, nothing],
         prs.grammar,
         prs.max_iter,
         nothing
@@ -550,11 +598,20 @@ struct Tree
     dynam::Union{Tree, Nothing} # dynamic child
 end
 
-"Recursively overwrite ValId with actual values"
-fill_value(t::Tree, v) = Tree(
-    Node(v[t.node.sym], v[t.node.input], v[t.node.output]),
-    fill_value(t.left, v), fill_value(t.right, v), fill_value(t.dynam, v))
-fill_value(t::Nothing, v) = nothing
+"Recursively overwrite ValId with actual values.
+Sample unsampled observations."
+function fill_value(t::Tree, prs::Parser)
+    for idx in (t.node.sym, t.node.input, t.node.output)
+        getvalue(prs, idx) == ObX && sampleobs!(prs, idx)
+    end
+    return Tree(Node(getvalue(prs, t.node.sym), 
+                     getvalue(prs, t.node.input), 
+                     getvalue(prs, t.node.output)),
+                fill_value(t.left, prs), 
+                fill_value(t.right, prs), 
+                fill_value(t.dynam, prs))
+end
+fill_value(_::Nothing, _) = nothing
 
 "Get tree from parser history"
 function gettree(prs::Parser)
@@ -576,7 +633,7 @@ function gettree(prs::Parser)
         prs = prs.prev
     end
     # fill actual values instead of indices to p.values
-    t = fill_value(stack[1], prs0.value)
+    t = fill_value(stack[1], prs0)
     return t
 end
 
@@ -699,10 +756,12 @@ function sample(ps::ParticleSystem, temperature=1)
 end
 
 "Sample N particle from the particle system with replacement.
+Use systematic sampling by default.
 Return nothing if all particles have zero weight."
-function sample_n(ps::ParticleSystem, n::Int)
-    ret = [sample(ps) for _ in 1:n]
-    return nothing in ret ? nothing : ret
+function sample_n(ps::ParticleSystem, n::Int, method::Symbol=:systematic)
+    distr = Distribution(getweights(ps))
+    idxs = sample_n(distr, n, method)
+    return [getparticle(ps, idx) for idx in idxs]
 end
 
 "Run the particle filter with a seed item.
@@ -737,9 +796,10 @@ end
 struct ConditionalParticleFilter
     num_particles::Int # total number of particles
     num_conditions::Int # number of conditional particles
+    parallel::Bool # parallel execution
     log::Dict
 end
-ConditionalParticleFilter(np, nc) = ConditionalParticleFilter(np, nc, Dict())
+ConditionalParticleFilter(np, nc, parallel) = ConditionalParticleFilter(np, nc, parallel, Dict())
 
 function get_trajectory(ptl::Particle)
     trajectory = Particle[]
@@ -756,7 +816,7 @@ Return nothing is the particle have a mismatch trajectory length.
 Otherwise return a particle system with its last particle being the input one." 
 function simulate(pf::ConditionalParticleFilter, ptls::Vector{Particle{T}}, data::Data) where T
     pf_with_as = ConditionalParticleFilterAS(
-        pf.num_particles, pf.num_conditions, 0, pf.log)
+        pf.num_particles, pf.num_conditions, 0, pf.parallel, pf.log)
     simulate(pf_with_as, ptls, data)
 end
 
@@ -765,9 +825,10 @@ struct ConditionalParticleFilterAS
     num_particles::Int # total number of particles
     num_conditions::Int # number of conditional particles
     eta::Float # probability of performing ancetor sampling
+    parallel::Bool # parallel execution
     log::Dict
 end
-ConditionalParticleFilterAS(np, nc, eta) = ConditionalParticleFilterAS(np, nc, eta, Dict())
+ConditionalParticleFilterAS(np, nc, eta, parallel) = ConditionalParticleFilterAS(np, nc, eta, parallel, Dict())
 
 "Run conditional particle filter with ancestor sampling (AS), 
 using an input particle for conditioning.
@@ -791,12 +852,24 @@ function simulate(pf::ConditionalParticleFilterAS, ptls::Vector{Particle{T}}, da
     for step in 1:length(data) + 1
         new_ps = ParticleSystem(ps)
         # draw new particles independently, but excluding the last few
-        for _ in 1:pf.num_particles - pf.num_conditions
-            ptl = sample(ps) # this will never fail
+        if pf.parallel
+            # prepare particles. Use systematic sampling for higher performance 
+            n = pf.num_particles - pf.num_conditions
+            new_ps.particles = sample_n(ps, n, :systematic)
             # use dummy obs = 0 for the last step
             obs = step <= length(data) ? getobservation(item, data[step]) : 0
-            new_ptl = simulate(ptl, obs)
-            push!(new_ps, new_ptl)
+            # simulate particles in parallel
+            Threads.@threads for idx in 1:n
+                new_ps.particles[idx] = simulate(new_ps.particles[idx], obs)
+            end
+        else
+            for _ in 1:pf.num_particles - pf.num_conditions
+                ptl = sample(ps) # this will never fail
+                # use dummy obs = 0 for the last step
+                obs = step <= length(data) ? getobservation(item, data[step]) : 0
+                new_ptl = simulate(ptl, obs)
+                push!(new_ps, new_ptl)
+            end
         end
         # add the conditioning particle, but with resampled ancestor
         for traj in ptl_trajectorys
@@ -859,7 +932,7 @@ For each data, run a standard particle filter until it succeeds, memorize some s
 The following runs will use conditional particle filter on these samples, and update them."
 function simulate(pe::ParticleEM, item::ParticleItem)
     pe.log["NLL"] = Float[]
-    for epoch in 1:pe.epochs
+    @showprogress for epoch in 1:pe.epochs
         for (data_id, data) in enumerate(pe.dataset)
             if isnothing(pe.memory[data_id])
                 ps = simulate(pe.ptlfilter, item, data)

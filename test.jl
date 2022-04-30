@@ -84,11 +84,38 @@ function cfg_learning_test()
     dataset = [reduce(*, [rand(dict) for j in 1:2]) for i in 1:100]
     prs = Parser(gm, 10)
     pf = ParticleFilter(10)
-    cpf = ConditionalParticleFilter(10, 1)
+    cpf = ConditionalParticleFilter(10, 1, false)
     schedule = Schedule(1e-3, 1e-3, 100)
     pe = ParticleEM(pf, cpf, dataset, 100, schedule)
+    println("Starting particle EM")
     simulate(pe, prs)
     summarize(pe, prs, 0.999)
     println(LineBreak)
 end
-cfg_learning_test()
+# @time cfg_learning_test()
+
+"Test grammar learning of DFG"
+function dfg_learning_test()
+    alphabet = "rstuvwxyz"
+    gm = init_grammar((3,0,0,0,3,0,0,0,0,1,1), alphabet, 1e-3, 0)
+    addrule!(gm, parserule("S5 -> C1 I1 1"))
+    addrule!(gm, parserule("S6 -> I1 I1 1"))
+    function getdata(alphabet)
+        word1 = string(rand(alphabet))
+        word2 = string(rand(alphabet))
+        return word1 * word2 * word1
+    end
+    dataset = [getdata(alphabet) for i in 1:100]
+    prs = Parser(gm, 10)
+    num_ptl, num_epochs = 200, 100
+    pf = ParticleFilter(num_ptl)
+    cpf = ConditionalParticleFilter(num_ptl, 1, true)
+    schedule = Schedule(1e-3, 1e-3, num_epochs)
+    pe = ParticleEM(pf, cpf, dataset, num_epochs, schedule)
+    println("Starting particle EM")
+    simulate(pe, prs)
+    summarize(pe, prs, 0.999)
+    println(LineBreak)
+end
+using Profile
+@time dfg_learning_test()
