@@ -819,13 +819,26 @@ function ancestorsample(ptl::Particle, ps::ParticleSystem)
 end
 
 
+"Learning rate schedule.
+Perform exponential decay from start to finish in num_steps"
+struct Schedule
+    start::Float
+    finish::Float
+    num_steps::Int
+end
+"Constant schedule"
+Schedule(x) = Schedule(x, x, 1)
+
+getvalue(s::Schedule, step::Int) =
+    s.start * exp(log(s.finish / s.start) * Float(step / s.num_steps))
+
 "Particle EM"
 struct ParticleEM
     ptlfilter::ParticleFilter
     condptlfilter::ConditionalParticleFilter
     dataset::Dataset
     epochs::Int
-    gamma::Float
+    gamma::Schedule
     memory::Vector{Any}
     log::Dict
 end
@@ -855,7 +868,7 @@ function simulate(pe::ParticleEM, item::ParticleItem)
             end
             if !isnothing(ps)
                 memory_update!(pe, data_id, ps)
-                model_update!(pe, item, ps)
+                model_update!(pe, item, ps, epoch)
                 nll(ps) < Inf && push!(pe.log["NLL"], nll(ps))
             end
         end
@@ -877,10 +890,11 @@ function memory_update!(pe::ParticleEM, data_id::Int, ps::ParticleSystem)
 end
 
 "Update model parameters using a particle system"
-function model_update!(pe::ParticleEM, item::Parser, ps::ParticleSystem)
+function model_update!(pe::ParticleEM, item::Parser, ps::ParticleSystem, step)
     gm = item.grammar
     # grammar weight decay
-    grammar_decay!(gm, pe.gamma)
+    gamma = getvalue(pe.gamma, step)
+    grammar_decay!(gm, gamma)
     ps_weight_total = sum(getweights(ps))
     for ptl in ps.particles
         # get normalized particle weight
@@ -889,7 +903,7 @@ function model_update!(pe::ParticleEM, item::Parser, ps::ParticleSystem)
         if ptl_weight > 0
             tree = gettree(ptl.item)
             # printtree(tree, gm)
-            grammar_update!(gm, tree, ptl_weight)
+            grammar_update!(gm, tree, gamma * ptl_weight)
         end
     end
 end
@@ -946,7 +960,10 @@ function summarize(pe::ParticleEM, prs::Parser, smooth_rate)
         ps = simulate(ParticleFilter(100), prs, data)
         printstatus(ps, 0.1)
     end
-    p1 = plot(smooth(pe.log["NLL"], smooth_rate))
-    p2 = histogram(filter(x->x>gm.alpha, reshape(gm.weight3d, :)), bins=10)
-    display(plot(p1, p2, layout=(2, 1)))
+    nll = smooth(pe.log["NLL"], smooth_rate)
+    p1 = plot(nll)
+    display(p1)
+    # p2 = histogram(filter(x->x>gm.alpha, reshape(gm.weight3d, :)), bins=10)
+    # display(plot(p1, p2, layout=(2, 1)))
+    println("Min NLL: ", minimum(nll))
 end
