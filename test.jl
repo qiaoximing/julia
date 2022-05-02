@@ -105,19 +105,20 @@ end
 
 "Test grammar learning limited to CFG"
 function word_learning(learner::Symbol)
-    gm = init_grammar((4,0,0,0,0,0,0,0,0,0,1), "xyz", 1e-3)
-    dict = ["xx", "yy", "z"]
-    dataset = [reduce(*, [rand(dict) for j in 1:2]) for i in 1:100]
+    gm = init_grammar((4,0,0,0,0,0,0,0,0,0,1), "yobapedi", 1e-3)
+    dict = ["yo", "ba", "pe", "di"]
+    dataset = [reduce(*, [rand(dict) for j in 1:3]) for i in 1:100]
+    curriculum = Curriculum([dataset], [100], [0])
     prs = Parser(gm, 10)
-    pf = ParticleFilter(10)
-    cpf = ConditionalParticleFilter(10, 1, false)
-    # cpf = ConditionalParticleFilterAS(10, 1, 1, false)
+    num_particles, num_epochs = 100, curriculum.totalepochs
+    pf = ParticleFilter(num_particles)
+    cpf = ConditionalParticleFilter(num_particles, 1, true)
     println("Start learning")
     if learner == :EM
-        schedule = Schedule(1e-3, 1e-3, 100)
-        pl = ParticleEM(pf, cpf, dataset, 100, schedule)
+        schedule = Schedule(1e-3, 1e-3, num_epochs)
+        pl = ParticleEM(pf, cpf, curriculum, num_epochs, schedule)
     elseif learner == :Gibbs
-        pl = ParticleGibbs(pf, cpf, dataset, 100, 1e-2)
+        pl = ParticleGibbs(pf, cpf, curriculum, num_epochs, 1/length(dataset))
     end
     simulate(pl, prs)
     summarize(pl, prs, 0.999)
@@ -128,37 +129,38 @@ end
 
 "Test grammar learning of DFG"
 function repetition_learning(learner::Symbol)
-    alphabet = "rstuvwxyz"
-    gm = init_grammar((3,0,0,0,3,0,0,0,0,1,1), alphabet, 1e-3, 0)
-    addrule!(gm, parserule("S5 -> C1 I1 1"))
-    # addrule!(gm, parserule("S6 -> I1 I1 1"))
-    function getdata(alphabet)
-        word1 = string(rand(alphabet))
-        word2 = string(rand(alphabet))
-        word3 = string(rand(alphabet))
+    dict = ["yo", "ba", "pe", "di"]
+    gm = init_grammar((8,0,0,0,3,0,0,0,0,1,1), "yobapedi", 1e-3)
+    addrule!(gm, parserule("S10 -> C1 I1 1"))
+    function getdata(dict)
+        word1 = rand(dict)
+        word2 = rand(dict)
+        word3 = rand(dict)
         return word1 * word2 * word1# * word3 * word1
     end
-    dataset = [getdata(alphabet) for i in 1:100]
+    dataset1 = [reduce(*, [rand(dict) for j in 1:3]) for i in 1:100]
+    dataset2 = [getdata(dict) for i in 1:100]
+    curriculum = Curriculum([dataset1, dataset2], [50, 50], [100])
     prs = Parser(gm, 10)
-    num_ptl, num_epochs = 100, 100
+    num_ptl, num_epochs = 400, curriculum.totalepochs
     pf = ParticleFilter(num_ptl)
     cpf = ConditionalParticleFilter(num_ptl, 1, true)
     println("Starting particle learner")
     if learner == :EM
         schedule = Schedule(1e-3, 1e-3, num_epochs)
-        pl = ParticleEM(pf, cpf, dataset, num_epochs, schedule)
+        pl = ParticleEM(pf, cpf, curriculum, num_epochs, schedule)
     elseif learner == :Gibbs
-        pl = ParticleGibbs(pf, cpf, dataset, num_epochs, 1/length(dataset))
+        pl = ParticleGibbs(pf, cpf, curriculum, num_epochs, 1/length(dataset1))
     end
     simulate(pl, prs)
     summarize(pl, prs, 0.999)
     println(LineBreak)
 end
-# @time repetition_learning(:Gibbs)
+@time repetition_learning(:Gibbs)
 
 function relation_learning(learner::Symbol)
     alphabet = "123456"
-    gm = init_grammar((3,0,0,0,3,0,0,0,3,1,1), alphabet, 1e-3, 0)
+    gm = init_grammar((3,0,0,0,3,0,0,0,3,1,1), alphabet, 1e-3)
     addrule!(gm, parserule("S5 -> C1 I1 1"))
     # addrule!(gm, parserule("S6 -> F1 I1 1"))
     function getdata1(alphabet)
@@ -193,4 +195,4 @@ function relation_learning(learner::Symbol)
     summarize(pl, prs, 0.999)
     println(LineBreak)
 end
-relation_learning(:Gibbs)
+# relation_learning(:Gibbs)

@@ -1103,6 +1103,7 @@ end
 function data_update!(pl::ParticleLearner, item::ParticleItem)
     curr = pl.curriculum
     curr.currentepoch += 1
+    if curr.numlevels == 1 return end
     epoch = curr.currentepoch
     finishepochs = cumsum(curr.durations[1:end-1] .+ curr.transitions)
     startepochs = finishepochs .- curr.transitions
