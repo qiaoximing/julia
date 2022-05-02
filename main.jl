@@ -12,12 +12,13 @@ const Float = Float32
 "Observations must be Int"
 const Observation = Int
 
-"Data must be string"
+"Data must be strings"
 const Data = String
 
-"Dataset as a vector of Data
-Change it later to support curriculum."
+"Dataset as a vector of Data"
 const Dataset = Vector{Data}
+
+
 
 "A special number representing unsampled observation"
 const ObX = -1
@@ -923,38 +924,54 @@ Schedule(x) = Schedule(x, x, 1)
 getvalue(s::Schedule, step::Int) =
     s.start * exp(log(s.finish / s.start) * Float(step / s.num_steps))
 
+"A sequence of datasets"
+mutable struct Curriculum 
+    numlevels::Int
+    datasets::Vector{Dataset}
+    durations::Vector{Int}
+    transitions::Vector{Int}
+    totalepochs::Int
+    currentepoch::Int
+    currentdataset::Dataset
+    currentlevel::Vector{Int}
+    memory::Vector{Any}
+end
+Curriculum(datasets, durations, transitions) = Curriculum(
+    length(datasets), datasets, durations, transitions, sum(durations) + sum(transitions),
+    1, datasets[1], ones(Int, length(datasets[1])), repeat(Any[nothing], length(datasets[1]))
+)
+
+"Get current dataset"
+currentdataset(curr::Curriculum) = curr.currentdataset
+
 abstract type ParticleLearner end
 
 "Particle EM"
 struct ParticleEM <: ParticleLearner
     ptlfilter::ParticleFilter
     condptlfilter::ConditionalParticleFilterAS
-    dataset::Dataset
+    curriculum::Curriculum
     epochs::Int
     gamma::Schedule
-    memory::Vector{Any}
     log::Dict
 end
 "Initialize particle EM with empty memory"
-function ParticleEM(ptlfilter, condptlfilter, dataset, epochs, gamma)
-    return ParticleEM(ptlfilter, condptlfilter, dataset, epochs, gamma,
-        repeat(Any[nothing], length(dataset)), Dict())
+function ParticleEM(ptlfilter, condptlfilter, curriculum, epochs, gamma)
+    return ParticleEM(ptlfilter, condptlfilter, curriculum, epochs, gamma, Dict())
 end
 
 "Particle Gibbs"
 struct ParticleGibbs <: ParticleLearner
     ptlfilter::ParticleFilter
     condptlfilter::ConditionalParticleFilterAS
-    dataset::Dataset
+    curriculum::Curriculum
     epochs::Int
     gamma::Float
-    memory::Vector{Any}
     log::Dict
 end
 "Initialize particle Gibbs with empty memory"
-function ParticleGibbs(ptlfilter, condptlfilter, dataset, epochs, gamma)
-    return ParticleGibbs(ptlfilter, condptlfilter, dataset, epochs, gamma,
-        repeat(Any[nothing], length(dataset)), Dict())
+function ParticleGibbs(ptlfilter, condptlfilter, curriculum, epochs, gamma)
+    return ParticleGibbs(ptlfilter, condptlfilter, curriculum, epochs, gamma, Dict())
 end
 
 "Run particle EM on a dataset.
@@ -963,16 +980,18 @@ The following runs will use conditional particle filter on these samples, and up
 function simulate(pe::ParticleEM, item::ParticleItem)
     pe.log["NLL"] = Float[]
     @showprogress for epoch in 1:pe.epochs
-        for (data_id, data) in enumerate(pe.dataset)
-            ps = isnothing(pe.memory[data_id]) ?
+        for (data_id, data) in enumerate(currentdataset(pe.curriculum))
+            memory = getmemory(pe, data_id)
+            ps = isnothing(memory) ?
                 simulate(pe.ptlfilter, item, data) :
-                simulate(pe.condptlfilter, pe.memory[data_id], data)
+                simulate(pe.condptlfilter, memory, data)
             if !isnothing(ps)
                 memory_update!(pe, data_id, ps)
                 model_update!(pe, item, ps, epoch)
                 nll(ps) < Inf && push!(pe.log["NLL"], nll(ps))
             end
         end
+        data_update!(pe, item)
     end
 end
 
@@ -982,10 +1001,11 @@ The following runs will use conditional particle filter on these samples, and up
 function simulate(pg::ParticleGibbs, item::ParticleItem)
     pg.log["NLL"] = Float[]
     @showprogress for epoch in 1:pg.epochs
-        for (data_id, data) in enumerate(pg.dataset)
-            ps = isnothing(pg.memory[data_id]) ?
+        for (data_id, data) in enumerate(currentdataset(pg.curriculum))
+            memory = getmemory(pg, data_id)
+            ps = isnothing(memory) ?
                 simulate(pg.ptlfilter, item, data) :
-                simulate(pg.condptlfilter, pg.memory[data_id], data)
+                simulate(pg.condptlfilter, memory, data)
             if !isnothing(ps)
                 model_update!(pg, item, data_id, true)
                 memory_update!(pg, data_id, ps)
@@ -993,6 +1013,7 @@ function simulate(pg::ParticleGibbs, item::ParticleItem)
                 nll(ps) < Inf && push!(pg.log["NLL"], nll(ps))
             end
         end
+        data_update!(pg, item)
     end
 end
 
@@ -1007,7 +1028,12 @@ end
 
 "Update the memory at data_id based on a particle system"
 function memory_update!(pl::ParticleLearner, data_id::Int, ps::ParticleSystem)
-    pl.memory[data_id] = sample_n(ps, pl.condptlfilter.num_conditions)
+    pl.curriculum.memory[data_id] = sample_n(ps, pl.condptlfilter.num_conditions)
+end
+
+"Get the memory at data_id "
+function getmemory(pl::ParticleLearner, data_id::Int)
+    return pl.curriculum.memory[data_id]
 end
 
 "Update model parameters using a particle system"
@@ -1031,10 +1057,11 @@ end
 
 function model_update!(pg::ParticleGibbs, item::Parser, data_id, negative)
     gm = item.grammar
-    isnothing(pg.memory[data_id]) && return 
-    for ptl in pg.memory[data_id]
+    memory = getmemory(pg, data_id)
+    isnothing(memory) && return 
+    for ptl in memory
         tree = gettree(ptl.item)
-        weight = (negative ? -pg.gamma : pg.gamma) / length(pg.memory[data_id])
+        weight = (negative ? -pg.gamma : pg.gamma) / length(memory)
         grammar_update!(gm, tree, weight)
     end
 end
@@ -1072,6 +1099,30 @@ function grammar_update!(gm::DFGrammar, t::Tree, w::Float)
     t.dynam isa Tree && grammar_update!(gm, t.dynam, w)
 end
 
+"Update dataset after each epoch, and update memory"
+function data_update!(pl::ParticleLearner, item::ParticleItem)
+    curr = pl.curriculum
+    curr.currentepoch += 1
+    epoch = curr.currentepoch
+    finishepochs = cumsum(curr.durations[1:end-1] .+ curr.transitions)
+    startepochs = finishepochs .- curr.transitions
+    level = findfirst(x->x[1]<epoch<=x[2], collect(zip(startepochs, finishepochs)))
+    if !isnothing(level)
+        remaining_transition_epochs = finishepochs[level] + 1 - epoch
+        ratio = 1 / remaining_transition_epochs
+        data_ids = findall(x->x==level && rand() < ratio, curr.currentlevel)
+        for data_id in data_ids
+            curr.currentdataset[data_id] = curr.datasets[level + 1][data_id]
+            curr.currentlevel[data_id] += 1
+            if pl isa ParticleGibbs && !isnothing(curr.memory[data_id])
+                model_update!(pl, item, data_id, true)
+            end
+            curr.memory[data_id] = nothing
+        end
+    end
+end
+
+
 "smoothen a vector with exponential decay"
 function smooth(xs, rate=0.99)
     length(xs) == 0 && return xs
@@ -1087,9 +1138,8 @@ end
 "print the results"
 function summarize(pl::ParticleLearner, prs::Parser, smooth_rate)
     gm = prs.grammar
-    for data in pl.dataset[1:5]
-        ps = simulate(ParticleFilter(100), prs, data)
-        printstatus(ps, 0.1)
+    for idx in 1:5
+        printstatus(getmemory(pl, idx)[1])
     end
     nll = smooth(pl.log["NLL"], smooth_rate)
     p1 = plot(nll)
