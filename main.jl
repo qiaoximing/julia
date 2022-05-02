@@ -19,8 +19,8 @@ const Data = String
 Change it later to support curriculum."
 const Dataset = Vector{Data}
 
-"A random Int for observation sampling"
-const ObX = 2814746717
+"A special number representing unsampled observation"
+const ObX = -1
 
 "Types of nodes in DFGrammar"
 @enum NodeType Sl Sr Pl Pr Slr Srl Plr Prl Fn Cn Id Ob
@@ -294,6 +294,10 @@ function sample_n(distr::Distribution{T}, n::Int, method::Symbol) where T
     if method == :multinomial
         return [sample(distr) for _ in 1:n]
     elseif method == :systematic
+        if distr.totalsum == 0
+            # warning("sample from a zero distribution")
+            return zeros(Int, n)
+        end
         nthsum = distr.totalsum / n
         r = rand(T) * nthsum
         result = Int[]
@@ -302,7 +306,7 @@ function sample_n(distr::Distribution{T}, n::Int, method::Symbol) where T
             r -= distr.bias
             while r < 0
                 push!(result, idx)
-                r += T(1) * nthsum
+                r += nthsum
             end
         end
         # this should occur with probability zero
@@ -354,17 +358,19 @@ end
 "Set up an empty parser for configuration"
 Parser(gm::DFGrammar, max_iter::Int) = Parser(newstack(), [], [], gm, max_iter, nothing)
 
+"Copy a parser with mutable value and distr"
+Base.copy(prs::Parser) = Parser(prs.stack, copy(prs.value), copy(prs.distr), prs.grammar, prs.max_iter, prs.prev)
+
 "Get value from a parser through value id"
 getvalue(prs::Parser, id::ValId) = prs.value[id]
 
 "Progress the parser to next observation.
 If observation == 0, check if the parser succeeds.
-Return a new parser and the weight update.
-Note that the new parser will create a copy of the mutable Parser.value"
+Return a new parser and the weight update."
 function simulate(prs::Parser, obs::Observation)
     weight_update = Float(1)
     # create a new copy
-    prs = Parser(prs.stack, copy(prs.value), copy(prs.distr), prs.grammar, prs.max_iter, prs.prev)
+    prs = copy(prs)
     for iter in 1:prs.max_iter
         # check empty stack
         if isempty(prs.stack)
@@ -392,15 +398,8 @@ function parse_obs!(prs::Parser, root::Node, obs::Observation)
     sym, input = getvalue(prs, root.sym), getvalue(prs, root.input)
     input == ObX && sampleobs!(prs, root.input)
     propagate!(prs, root.input, root.output)
-    if obs == 0 # try to read a non-existing observation, parse fail
-        weight_update = 0
-    elseif sym == ObX # observation not sampled
-        probability = setvalue!(prs, root.sym, obs)
-        weight_update = probability / obsprobability(prs, root.sym)
-    else # observation already sampled
-        probability = obs == sym ? 1 : 0
-        weight_update = probability
-    end
+    weight_update = obs == 0 ? 0 : # try to read a non-existing observation, parse fail
+        setvalue!(prs, root.sym, obs) # otherwise set the value
     finish = true
     return finish, weight_update
 end
@@ -556,10 +555,18 @@ function propagate!(prs::Parser, source, target)
     prs.distr[target] = prs.distr[source]
 end
 
-"force setting a value, and return its probability"
+"force setting a value, and return its probability.
+If the value is already set, return 1 or 0"
 function setvalue!(prs::Parser, idx, val)
-    prs.value[idx] = val
-    return getprobability(prs.distr[idx], val)
+    if prs.value[idx] == 0
+        prs.value[idx] = val
+        return getprobability(prs.distr[idx], val)
+    elseif prs.value[idx] == ObX
+        prs.value[idx] = val
+        return getprobability(prs.distr[idx], val) / obsprobability(prs, idx)
+    else # prs.value[idx] > 0
+        return prs.value[idx] == val ? Float(1) : Float(0)
+    end
 end
 
 "Create a new Parser with a root node 1, input val 1, and output val 0(unknown)"
@@ -789,17 +796,8 @@ function simulate(pf::ParticleFilter, item::ParticleItem, data::Data)
         push!(pf.log["ESS"], effective_sample_size(ps))
         # printstatus(ps)
     end
-    return ps
+    return sum(getweights(ps)) > 0 ? ps : nothing
 end
-
-"Conditional Particle Filter"
-struct ConditionalParticleFilter
-    num_particles::Int # total number of particles
-    num_conditions::Int # number of conditional particles
-    parallel::Bool # parallel execution
-    log::Dict
-end
-ConditionalParticleFilter(np, nc, parallel) = ConditionalParticleFilter(np, nc, parallel, Dict())
 
 function get_trajectory(ptl::Particle)
     trajectory = Particle[]
@@ -810,16 +808,6 @@ function get_trajectory(ptl::Particle)
     return reverse(trajectory)
 end
 
-"Run conditional particle filter with an input particle for conditioning.
-A special case of conditional particle filter with ancestor sampling.
-Return nothing is the particle have a mismatch trajectory length.
-Otherwise return a particle system with its last particle being the input one." 
-function simulate(pf::ConditionalParticleFilter, ptls::Vector{Particle{T}}, data::Data) where T
-    pf_with_as = ConditionalParticleFilterAS(
-        pf.num_particles, pf.num_conditions, 0, pf.parallel, pf.log)
-    simulate(pf_with_as, ptls, data)
-end
-
 "Conditional Particle Filter with ancestor sampling"
 struct ConditionalParticleFilterAS
     num_particles::Int # total number of particles
@@ -828,6 +816,7 @@ struct ConditionalParticleFilterAS
     parallel::Bool # parallel execution
     log::Dict
 end
+ConditionalParticleFilter(np, nc, parallel) = ConditionalParticleFilterAS(np, nc, Float(0), parallel, Dict())
 ConditionalParticleFilterAS(np, nc, eta, parallel) = ConditionalParticleFilterAS(np, nc, eta, parallel, Dict())
 
 "Run conditional particle filter with ancestor sampling (AS), 
@@ -847,17 +836,18 @@ function simulate(pf::ConditionalParticleFilterAS, ptls::Vector{Particle{T}}, da
     item = ptls[1].item
     ps = ParticleSystem(pf.num_particles - pf.num_conditions, item)
     push!(ps, first.(ptl_trajectorys)...)
+    use_ancestorsampling = rand() < pf.eta
     pf.log["ESS"] = Float[]
     # go one more step after the last observation
     for step in 1:length(data) + 1
         new_ps = ParticleSystem(ps)
+        # use dummy obs = 0 for the last step
+        obs = step <= length(data) ? getobservation(item, data[step]) : 0
         # draw new particles independently, but excluding the last few
         if pf.parallel
             # prepare particles. Use systematic sampling for higher performance 
             n = pf.num_particles - pf.num_conditions
             new_ps.particles = sample_n(ps, n, :systematic)
-            # use dummy obs = 0 for the last step
-            obs = step <= length(data) ? getobservation(item, data[step]) : 0
             # simulate particles in parallel
             Threads.@threads for idx in 1:n
                 new_ps.particles[idx] = simulate(new_ps.particles[idx], obs)
@@ -865,17 +855,16 @@ function simulate(pf::ConditionalParticleFilterAS, ptls::Vector{Particle{T}}, da
         else
             for _ in 1:pf.num_particles - pf.num_conditions
                 ptl = sample(ps) # this will never fail
-                # use dummy obs = 0 for the last step
-                obs = step <= length(data) ? getobservation(item, data[step]) : 0
                 new_ptl = simulate(ptl, obs)
                 push!(new_ps, new_ptl)
             end
         end
         # add the conditioning particle, but with resampled ancestor
         for traj in ptl_trajectorys
-            new_ptl = traj[step + 1]
-            if rand() < pf.eta
-                new_ptl = ancestorsample(new_ptl, ps) # use the old ps
+            if use_ancestorsampling
+                new_ptl = ancestorsample(traj, step, ps, obs)
+            else
+                new_ptl = traj[step + 1]
             end
             push!(new_ps, new_ptl)
         end
@@ -887,10 +876,39 @@ function simulate(pf::ConditionalParticleFilterAS, ptls::Vector{Particle{T}}, da
     return ps
 end
 
-function ancestorsample(ptl::Particle, ps::ParticleSystem)
-    return ptl
+"Ancestor sampling from a particle system"
+function ancestorsample(traj::Vector{Particle}, step::Int, ps::ParticleSystem, obs)
+    weights = [ancestorweight(traj[step].item, traj[end].item, p.item) for p in ps.particles]
+    weights .*= getweights(ps)
+    idx = sample(Distribution(weights))
+    return ancestorsimulate(traj[step + 1], ps, idx, obs)
 end
 
+"Ancestor evaluation of parsers"
+function ancestorweight(prs_current, prs_future, prs_past)
+    if length(prs_current.stack) != length(prs_past.stack)
+        weight = Float(0) # mismatch stack length
+    else
+        weight = Float(1)
+        # create a copy for parser simulation
+        prs_past = copy(prs_past)
+        # simulate the parsing process to get the weight
+        for (node_current, node_past) in zip(prs_current.stack, prs_past.stack)
+            weight *= setvalue!(prs_past, node_past.sym, getvalue(prs_future, node_current.sym))
+            weight *= setvalue!(prs_past, node_past.input, getvalue(prs_future, node_current.input))
+            prs_past.value[node_past.output] = getvalue(prs_future, node_current.output)
+        end
+    end
+    return weight
+end
+
+"First use the parser.prev to get every parse_step done by prs_current,
+then perform the exact same actions on prs_past."
+function ancestorsimulate(ptl::Particle, ps::ParticleSystem, idx, obs)
+    # prs_past = getparticle(ps, idx).item
+    # prs_current = ptl.item
+    return ptl
+end
 
 "Learning rate schedule.
 Perform exponential decay from start to finish in num_steps"
@@ -905,10 +923,12 @@ Schedule(x) = Schedule(x, x, 1)
 getvalue(s::Schedule, step::Int) =
     s.start * exp(log(s.finish / s.start) * Float(step / s.num_steps))
 
+abstract type ParticleLearner end
+
 "Particle EM"
-struct ParticleEM
+struct ParticleEM <: ParticleLearner
     ptlfilter::ParticleFilter
-    condptlfilter::ConditionalParticleFilter
+    condptlfilter::ConditionalParticleFilterAS
     dataset::Dataset
     epochs::Int
     gamma::Schedule
@@ -921,10 +941,20 @@ function ParticleEM(ptlfilter, condptlfilter, dataset, epochs, gamma)
         repeat(Any[nothing], length(dataset)), Dict())
 end
 
-"Particle EM with ancestor sampling"
-struct ParticleEMAS
+"Particle Gibbs"
+struct ParticleGibbs <: ParticleLearner
     ptlfilter::ParticleFilter
-    condptlfilterAS::ConditionalParticleFilterAS
+    condptlfilter::ConditionalParticleFilterAS
+    dataset::Dataset
+    epochs::Int
+    gamma::Float
+    memory::Vector{Any}
+    log::Dict
+end
+"Initialize particle Gibbs with empty memory"
+function ParticleGibbs(ptlfilter, condptlfilter, dataset, epochs, gamma)
+    return ParticleGibbs(ptlfilter, condptlfilter, dataset, epochs, gamma,
+        repeat(Any[nothing], length(dataset)), Dict())
 end
 
 "Run particle EM on a dataset.
@@ -934,15 +964,33 @@ function simulate(pe::ParticleEM, item::ParticleItem)
     pe.log["NLL"] = Float[]
     @showprogress for epoch in 1:pe.epochs
         for (data_id, data) in enumerate(pe.dataset)
-            if isnothing(pe.memory[data_id])
-                ps = simulate(pe.ptlfilter, item, data)
-            else
-                ps = simulate(pe.condptlfilter, pe.memory[data_id], data)
-            end
+            ps = isnothing(pe.memory[data_id]) ?
+                simulate(pe.ptlfilter, item, data) :
+                simulate(pe.condptlfilter, pe.memory[data_id], data)
             if !isnothing(ps)
                 memory_update!(pe, data_id, ps)
                 model_update!(pe, item, ps, epoch)
                 nll(ps) < Inf && push!(pe.log["NLL"], nll(ps))
+            end
+        end
+    end
+end
+
+"Run particle Gibbs on a dataset.
+For each data, run a standard particle filter until it succeeds, memorize some samples.
+The following runs will use conditional particle filter on these samples, and update them."
+function simulate(pg::ParticleGibbs, item::ParticleItem)
+    pg.log["NLL"] = Float[]
+    @showprogress for epoch in 1:pg.epochs
+        for (data_id, data) in enumerate(pg.dataset)
+            ps = isnothing(pg.memory[data_id]) ?
+                simulate(pg.ptlfilter, item, data) :
+                simulate(pg.condptlfilter, pg.memory[data_id], data)
+            if !isnothing(ps)
+                model_update!(pg, item, data_id, true)
+                memory_update!(pg, data_id, ps)
+                model_update!(pg, item, data_id, false)
+                nll(ps) < Inf && push!(pg.log["NLL"], nll(ps))
             end
         end
     end
@@ -958,8 +1006,8 @@ function update_loglikelihood(ps::ParticleSystem)
 end
 
 "Update the memory at data_id based on a particle system"
-function memory_update!(pe::ParticleEM, data_id::Int, ps::ParticleSystem)
-    pe.memory[data_id] = sample_n(ps, pe.condptlfilter.num_conditions)
+function memory_update!(pl::ParticleLearner, data_id::Int, ps::ParticleSystem)
+    pl.memory[data_id] = sample_n(ps, pl.condptlfilter.num_conditions)
 end
 
 "Update model parameters using a particle system"
@@ -978,6 +1026,16 @@ function model_update!(pe::ParticleEM, item::Parser, ps::ParticleSystem, step)
             # printtree(tree, gm)
             grammar_update!(gm, tree, gamma * ptl_weight)
         end
+    end
+end
+
+function model_update!(pg::ParticleGibbs, item::Parser, data_id, negative)
+    gm = item.grammar
+    isnothing(pg.memory[data_id]) && return 
+    for ptl in pg.memory[data_id]
+        tree = gettree(ptl.item)
+        weight = (negative ? -pg.gamma : pg.gamma) / length(pg.memory[data_id])
+        grammar_update!(gm, tree, weight)
     end
 end
 
@@ -1027,13 +1085,13 @@ function smooth(xs, rate=0.99)
 end
 
 "print the results"
-function summarize(pe::ParticleEM, prs::Parser, smooth_rate)
+function summarize(pl::ParticleLearner, prs::Parser, smooth_rate)
     gm = prs.grammar
-    for data in pe.dataset[1:5]
+    for data in pl.dataset[1:5]
         ps = simulate(ParticleFilter(100), prs, data)
         printstatus(ps, 0.1)
     end
-    nll = smooth(pe.log["NLL"], smooth_rate)
+    nll = smooth(pl.log["NLL"], smooth_rate)
     p1 = plot(nll)
     display(p1)
     # p2 = histogram(filter(x->x>gm.alpha, reshape(gm.weight3d, :)), bins=10)
