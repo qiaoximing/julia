@@ -84,7 +84,7 @@ false Id
 "Test the parser on simple grammars"
 function parser_test()
     # Random.seed!(1)
-    gm = init_grammar(rules1z)
+    gm = init_grammar(rules1)
     data = generate_sentence(gm)
     println("Data: $data")
     prs = Parser(gm, 10)
@@ -104,34 +104,37 @@ end
 # parser_test()
 
 "Test grammar learning limited to CFG"
-function word_learning(learner::Symbol)
-    gm = init_grammar((4,0,0,0,0,0,0,0,0,0,1), "yobapedi", 1e-3)
+function word_learning(learner::Symbol, alpha)
+    gm = init_grammar((4,0,0,0,0,0,0,0,0,0,1), "yobapedi", alpha)
     dict = ["yo", "ba", "pe", "di"]
     dataset = [reduce(*, [rand(dict) for j in 1:3]) for i in 1:100]
     curriculum = Curriculum([dataset], [100], [0])
     prs = Parser(gm, 10)
-    num_particles, num_epochs = 100, curriculum.totalepochs
+    num_particles, num_epochs = 10, curriculum.totalepochs
     pf = ParticleFilter(num_particles)
-    cpf = ConditionalParticleFilter(num_particles, 1, true)
+    cpf = ConditionalParticleFilter(num_particles, 1, false)
     println("Start learning")
     if learner == :EM
         schedule = Schedule(1e-3, 1e-3, num_epochs)
         pl = ParticleEM(pf, cpf, curriculum, num_epochs, schedule)
     elseif learner == :Gibbs
-        pl = ParticleGibbs(pf, cpf, curriculum, num_epochs, 1/length(dataset))
+        pl = ParticleGibbs(pf, cpf, curriculum, num_epochs, 1)
     end
     simulate(pl, prs)
     summarize(pl, prs, 0.999)
     println(LineBreak)
 end
-# @time word_learning(:EM)
-# @time word_learning(:Gibbs)
+# @time word_learning(:EM, 1e-3)
+@time word_learning(:Gibbs, 1e-1)
 
 "Test grammar learning of DFG"
-function repetition_learning(learner::Symbol)
+function repetition_learning(learner::Symbol, alpha)
     dict = ["yo", "ba", "pe", "di"]
-    gm = init_grammar((8,0,0,0,3,0,0,0,0,1,1), "yobapedi", 1e-3)
-    addrule!(gm, parserule("S10 -> C1 I1 1"))
+    gm = init_grammar((8,0,0,0,3,0,0,0,0,1,1), "yobapedi", alpha)
+    addrule!(gm, parserule("S10 -> C1 I1 100"))
+    # dict = ["w", "x", "y", "z"]
+    # gm = init_grammar((3,0,0,0,3,0,0,0,0,1,1), "wxyz", alpha)
+    # addrule!(gm, parserule("S4 -> C1 I1 100"))
     function getdata(dict)
         word1 = rand(dict)
         word2 = rand(dict)
@@ -140,9 +143,9 @@ function repetition_learning(learner::Symbol)
     end
     dataset1 = [reduce(*, [rand(dict) for j in 1:3]) for i in 1:100]
     dataset2 = [getdata(dict) for i in 1:100]
-    curriculum = Curriculum([dataset1, dataset2], [50, 50], [100])
+    curriculum = Curriculum([dataset1, dataset2], [50, 100], [1])
     prs = Parser(gm, 10)
-    num_ptl, num_epochs = 400, curriculum.totalepochs
+    num_ptl, num_epochs = 100, curriculum.totalepochs
     pf = ParticleFilter(num_ptl)
     cpf = ConditionalParticleFilter(num_ptl, 1, true)
     println("Starting particle learner")
@@ -150,17 +153,17 @@ function repetition_learning(learner::Symbol)
         schedule = Schedule(1e-3, 1e-3, num_epochs)
         pl = ParticleEM(pf, cpf, curriculum, num_epochs, schedule)
     elseif learner == :Gibbs
-        pl = ParticleGibbs(pf, cpf, curriculum, num_epochs, 1/length(dataset1))
+        pl = ParticleGibbs(pf, cpf, curriculum, num_epochs, 1)
     end
     simulate(pl, prs)
     summarize(pl, prs, 0.999)
     println(LineBreak)
 end
-@time repetition_learning(:Gibbs)
+# @time repetition_learning(:Gibbs, 1e-1)
 
-function relation_learning(learner::Symbol)
+function relation_learning(learner::Symbol, alpha)
     alphabet = "123456"
-    gm = init_grammar((3,0,0,0,3,0,0,0,3,1,1), alphabet, 1e-3)
+    gm = init_grammar((3,0,0,0,3,0,0,0,3,1,1), alphabet, alpha)
     addrule!(gm, parserule("S5 -> C1 I1 1"))
     # addrule!(gm, parserule("S6 -> F1 I1 1"))
     function getdata1(alphabet)
@@ -179,7 +182,9 @@ function relation_learning(learner::Symbol)
     num_data = 100
     dataset1 = [getdata1(alphabet) for i in 1:num_data]
     dataset2 = [getdata2(alphabet) for i in 1:num_data]
-    curriculum = Curriculum([dataset1, dataset2], [50,50], [100])
+    # curriculum = Curriculum([dataset1], [100], [0])
+    curriculum = Curriculum([dataset2], [100], [0])
+    # curriculum = Curriculum([dataset1, dataset2], [50,50], [100])
     prs = Parser(gm, 10)
     num_ptl, num_epochs = 400, curriculum.totalepochs
     pf = ParticleFilter(num_ptl)
@@ -189,10 +194,10 @@ function relation_learning(learner::Symbol)
         schedule = Schedule(1e-3, 1e-3, num_epochs)
         pl = ParticleEM(pf, cpf, curriculum, num_epochs, schedule)
     elseif learner == :Gibbs
-        pl = ParticleGibbs(pf, cpf, curriculum, num_epochs, 1/num_data)
+        pl = ParticleGibbs(pf, cpf, curriculum, num_epochs, 1)
     end
     simulate(pl, prs)
     summarize(pl, prs, 0.999)
     println(LineBreak)
 end
-# relation_learning(:Gibbs)
+# relation_learning(:Gibbs, 1e-1)

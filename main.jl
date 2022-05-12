@@ -3,6 +3,7 @@ This will be the main program
 Our current goal is to implement PGAS learning with TD parser
 =#
 using DataStructures
+using SparseArrayKit
 using Plots
 using ProgressMeter
 
@@ -214,44 +215,58 @@ function getnodetype(gm::DFGrammar, sym::Int)
 end
 
 "Fn output given symbol and input."
-function distr_fn(gm::DFGrammar, sym, input)
-    distr = Distribution(view(gm.weight3d, :, input, sym), gm.weight2d[input, sym], gm.alpha)
+function distr_fn(gm::DFGrammar, sym, input, prs=nothing)
+    patch = isnothing(prs) ? nothing : view(prs.patch3d, :, input, sym)
+    distr = Distribution(view(gm.weight3d, :, input, sym), gm.weight2d[input, sym], 
+                         gm.alpha, patch)
+                         
     return distr
 end
 
 "Cn output given symbol."
-function distr_cn(gm::DFGrammar, sym)
-    distr = Distribution(view(gm.weight2d, :, sym), gm.weight1d[sym], gm.alpha)
+function distr_cn(gm::DFGrammar, sym, prs=nothing)
+    patch = isnothing(prs) ? nothing : view(prs.patch2d, :, sym)
+    distr = Distribution(view(gm.weight2d, :, sym), gm.weight1d[sym], 
+                         gm.alpha, patch)
+                         
     return distr
 end
 
 "left child given symbol."
-function distr_left(gm::DFGrammar, sym)
-    bias = gm.alpha #* size(gm)
-    distr = Distribution(view(gm.weight2d, :, sym), gm.weight1d[sym], bias)
+function distr_left(gm::DFGrammar, sym, prs=nothing)
+    bias = gm.alpha * size(gm)
+    patch = isnothing(prs) ? nothing : view(prs.patch2d, :, sym)
+    distr = Distribution(view(gm.weight2d, :, sym), gm.weight1d[sym], 
+                         bias, patch)
     return distr
 end
 
 "right child given symbol and left."
-function distr_right(gm::DFGrammar, sym, left)
-    distr = Distribution(view(gm.weight3d, :, left, sym), gm.weight2d[left, sym], gm.alpha)
+function distr_right(gm::DFGrammar, sym, left, prs=nothing)
+    patch = isnothing(prs) ? nothing : view(prs.patch3d, :, left, sym)
+    distr = Distribution(view(gm.weight3d, :, left, sym), gm.weight2d[left, sym], 
+                         gm.alpha, patch)
     return distr
 end
 
 "Unnormalized probabilistic distribution with optional smoothing"
 struct Distribution{T<:Real}
     weight::AbstractArray{T} # a view or an array
-    sum::T # sum of weights excluding bias
+    sum::T # sum of weights excluding bias and patch
     bias::T # add bias to weights for smoothing
-    totalsum::T # sum of weights and bias
+    patch::Union{Nothing, AbstractArray{T}} # patch for grammar update, usually sparse
 end
 
-"Initialize a distribution from weights and calculate sum if not provided.
-Note: cannot use Distribution(weight, sum). Use Distribution(weight, sum, 0) instead"
+"Initialize a distribution from weights and calculate sum if not provided."
 function Distribution(weight::AbstractArray{T}, sum::T, bias::T) where {T}
-    return Distribution(weight, sum, bias, sum + length(weight) * bias)
+    return Distribution(weight, sum, bias, nothing)
 end
-Distribution(weight::AbstractArray{T}, bias::T) where {T} = Distribution(weight, sum(weight), bias)
+function Distribution(weight::AbstractArray{T}, bias::T) where {T}
+    return Distribution(weight, sum(weight), bias)
+end
+function Distribution(weight::AbstractArray{T}, bias::T, patch::AbstractArray{T}) where {T} 
+    return Distribution(weight, sum(weight), bias, patch)
+end
 Distribution(weight::AbstractArray{T}) where {T} = Distribution(weight, sum(weight), T(0))
 
 "Return a zero distribution"
@@ -264,22 +279,32 @@ function onehotdistr(T, size, idx, bias=0)
     return Distribution(weight, T(1), T(bias))
 end
 
+"Get total sum including bias and patch"
+function gettotalsum(distr::Distribution)
+    return distr.sum + length(distr.weight) * distr.bias + (
+        isnothing(distr.patch) ? 0 : sum(distr.patch))
+end
+
 "Get the normalized probability at location idx.
 Might get NaN"
 function getprobability(distr::Distribution, idx)
-    return (distr.weight[idx] + distr.bias) / distr.totalsum
+    return (distr.weight[idx] + distr.bias) / gettotalsum(distr)
 end
 
 "Sample from a distribution and return index.
 Return zero for zero distribution."
 function sample(distr::Distribution{T}) where T
-    if distr.totalsum == 0
+    totalsum = gettotalsum(distr)
+    if totalsum == 0
         # warning("sample from a zero distribution")
         return 0
     end
-    r = rand(T) * distr.totalsum
+    r = rand(T) * totalsum
     for idx in eachindex(distr.weight)
         @inbounds r -= distr.weight[idx]
+        if !isnothing(distr.patch)
+            @inbounds r -= distr.patch[idx]
+        end
         r -= distr.bias
         if r < 0
             return idx
@@ -295,15 +320,19 @@ function sample_n(distr::Distribution{T}, n::Int, method::Symbol) where T
     if method == :multinomial
         return [sample(distr) for _ in 1:n]
     elseif method == :systematic
-        if distr.totalsum == 0
+        totalsum = gettotalsum(distr)
+        if totalsum == 0
             # warning("sample from a zero distribution")
             return zeros(Int, n)
         end
-        nthsum = distr.totalsum / n
+        nthsum = totalsum / n
         r = rand(T) * nthsum
         result = Int[]
         for idx in eachindex(distr.weight)
             @inbounds r -= distr.weight[idx]
+            if !isnothing(distr.patch)
+                @inbounds r -= distr.patch[idx]
+            end
             r -= distr.bias
             while r < 0
                 push!(result, idx)
@@ -351,16 +380,41 @@ struct Parser <: ParticleItem
     stack::ParseStack
     value::Vector{Int}
     distr::Vector{Union{Distribution, Nothing}}
+    patch3d::SparseArray{Float, 3}
+    patch2d::SparseArray{Float, 2}
     grammar::DFGrammar
     max_iter::Int # restrict the number of parsing actions performed in one simulation
     prev::Union{Parser, Nothing} # track the parse history. used to recover parse tree, not related to Particle.ancestor
 end
 
 "Set up an empty parser for configuration"
-Parser(gm::DFGrammar, max_iter::Int) = Parser(newstack(), [], [], gm, max_iter, nothing)
+Parser(gm::DFGrammar, max_iter::Int) = Parser(
+    newstack(), [], [], 
+    SparseArray{Float}(undef, size(gm.weight3d)), 
+    SparseArray{Float}(undef, size(gm.weight2d)), 
+    gm, max_iter, nothing)
 
 "Copy a parser with mutable value and distr"
-Base.copy(prs::Parser) = Parser(prs.stack, copy(prs.value), copy(prs.distr), prs.grammar, prs.max_iter, prs.prev)
+Base.copy(prs::Parser) = Parser(
+    prs.stack, copy(prs.value), copy(prs.distr), 
+    copy(prs.patch3d), copy(prs.patch2d),
+    prs.grammar, prs.max_iter, prs.prev)
+
+"Create a new Parser with a root node 1, input val 1, and output val 0(unknown)"
+function initialize(prs::Parser)
+    # distr = onehotdistr(Float, size(prs.grammar), 1)
+    return Parser(
+        newstack(Node(1, 2, 3)),
+        [1, 1, 0],
+        # [distr, distr, nothing],
+        [nothing, nothing, nothing],
+        SparseArray{Float}(undef, size(prs.grammar.weight3d)), 
+        SparseArray{Float}(undef, size(prs.grammar.weight2d)), 
+        prs.grammar,
+        prs.max_iter,
+        nothing
+    )
+end
 
 "Get value from a parser through value id"
 getvalue(prs::Parser, id::ValId) = prs.value[id]
@@ -425,11 +479,11 @@ function parse_step!(prs::Parser, root::Node, obs::Observation)
         if input == ObX 
             input = sampleobs!(prs, root.input)
         end
-        distr = distr_fn(prs.grammar, sym, input)
+        distr = distr_fn(prs.grammar, sym, input, prs)
         setdistr!(prs, root.output, distr)
         samplevalue!(prs, root.output)
     elseif type == Cn
-        distr = distr_cn(prs.grammar, sym)
+        distr = distr_cn(prs.grammar, sym, prs)
         setdistr!(prs, root.output, distr)
         samplevalue!(prs, root.output)
     elseif type == Id
@@ -441,7 +495,7 @@ function parse_step!(prs::Parser, root::Node, obs::Observation)
         # create children node
         left_child, right_child, dynam_child = parse_create_children!(prs, root, type)
         # sample left child immediately
-        setdistr!(prs, left_child.sym, distr_left(prs.grammar, sym))
+        setdistr!(prs, left_child.sym, distr_left(prs.grammar, sym, prs))
         left_val = samplevalue!(prs, left_child.sym)
         # if left is observation, process it immediately
         if left_val == ObX
@@ -451,7 +505,7 @@ function parse_step!(prs::Parser, root::Node, obs::Observation)
         end
         # setup right child distribution, but don't sample it yet
         if weight_update > 0
-            setdistr!(prs, right_child.sym, distr_right(prs.grammar, sym, left_val))
+            setdistr!(prs, right_child.sym, distr_right(prs.grammar, sym, left_val, prs))
         end
         # update stack
         if !isnothing(dynam_child) new_stack = cons(dynam_child, new_stack) end
@@ -459,11 +513,13 @@ function parse_step!(prs::Parser, root::Node, obs::Observation)
         new_stack = cons(left_child, new_stack)
     end
     # create a new parser with the new stack and the old mutated value
-    new_prs = Parser(new_stack, prs.value, prs.distr, prs.grammar, prs.max_iter, prs)
+    new_prs = Parser(new_stack, prs.value, prs.distr, prs.patch3d, prs.patch2d, 
+                     prs.grammar, prs.max_iter, prs)
     # pop stack top is left child is already process
     if left_child_processed
         prs = new_prs # keep this in parse history for tree printing
-        new_prs = Parser(tail(prs.stack), prs.value, prs.distr, prs.grammar, prs.max_iter, prs)
+        new_prs = Parser(tail(prs.stack), prs.value, prs.distr, prs.patch3d, 
+                         prs.patch2d, prs.grammar, prs.max_iter, prs)
     end
     # println("Observation: $obs")
     # println("Processing node: $(prs.grammar.label[sym])")
@@ -510,14 +566,15 @@ end
 
 "get the total probability of generating an observation"
 function obsprobability(prs::Parser, idx)
-    return distr_obs(prs, idx).totalsum / prs.distr[idx].totalsum
+    return gettotalsum(distr_obs(prs, idx)) / gettotalsum(prs.distr[idx])
 end
 
 "sample an ObX to a value.
 Use a truncated distribution, then add back the offset"
 function sampleobs!(prs::Parser, idx)
     obs_distr = distr_obs(prs, idx)
-    prs.value[idx] = sample(obs_distr) + first(range(prs.grammar, Ob)) - 1
+    val = sample(obs_distr) + first(range(prs.grammar, Ob)) - 1
+    setvalue!(prs, idx, val)
     return prs.value[idx]
 end
 
@@ -546,7 +603,7 @@ function samplevalue!(prs::Parser, idx, useObX=true)
     if useObX && getnodetype(prs.grammar, val) == Ob
         val = ObX
     end
-    prs.value[idx] = val
+    setvalue!(prs, idx, val)
     return val
 end
 
@@ -559,30 +616,28 @@ end
 "force setting a value, and return its probability.
 If the value is already set, return 1 or 0"
 function setvalue!(prs::Parser, idx, val)
-    if prs.value[idx] == 0
-        prs.value[idx] = val
-        return getprobability(prs.distr[idx], val)
-    elseif prs.value[idx] == ObX
-        prs.value[idx] = val
-        return getprobability(prs.distr[idx], val) / obsprobability(prs, idx)
-    else # prs.value[idx] > 0
+    if prs.value[idx] > 0
         return prs.value[idx] == val ? Float(1) : Float(0)
+    else
+        # set value
+        prs.value[idx] = val
+        # eval probability
+        # TODO: the probability will be wrong if patch is mutated
+        if val == ObX
+            prob = obsprobability(prs, idx)
+        elseif prs.value[idx] == 0
+            prob = getprobability(prs.distr[idx], val)
+        else # prs.value[idx] == ObX
+            prob = getprobability(prs.distr[idx], val) / obsprobability(prs, idx)
+        end
+        # update grammar patch
+        if val > 0
+            prs.distr[idx].patch[val] += 1.
+        end
+        return prob
     end
 end
 
-"Create a new Parser with a root node 1, input val 1, and output val 0(unknown)"
-function initialize(prs::Parser)
-    distr = onehotdistr(Float, size(prs.grammar), 1)
-    return Parser(
-        newstack(Node(1, 2, 3)),
-        [1, 1, 0],
-        # [distr, distr, nothing],
-        [nothing, nothing, nothing],
-        prs.grammar,
-        prs.max_iter,
-        nothing
-    )
-end
 
 function getobservation(gm::DFGrammar, str::AbstractString)
     return [gm.labelindex[string(char)] for char in str]
@@ -1144,8 +1199,8 @@ function summarize(pl::ParticleLearner, prs::Parser, smooth_rate)
     end
     nll = smooth(pl.log["NLL"], smooth_rate)
     p1 = plot(nll)
-    display(p1)
-    # p2 = histogram(filter(x->x>gm.alpha, reshape(gm.weight3d, :)), bins=10)
-    # display(plot(p1, p2, layout=(2, 1)))
+    # display(p1)
+    p2 = histogram(filter(x->x>gm.alpha, reshape(gm.weight3d, :)), bins=10)
+    display(plot(p1, p2, layout=(2, 1)))
     println("Min NLL: ", minimum(nll))
 end
