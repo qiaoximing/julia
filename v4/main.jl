@@ -6,6 +6,7 @@ using DataStructures
 using SparseArrayKit
 using Plots
 using ProgressMeter
+using JLD
 
 "Set to Float32 or Float64"
 const Float = Float32
@@ -1065,8 +1066,13 @@ function simulate(pg::ParticleGibbs, item::ParticleItem)
                 model_update!(pg, item, data_id, true)
                 memory_update!(pg, data_id, ps)
                 model_update!(pg, item, data_id, false)
-                nll(ps) < Inf && push!(pg.log["NLL"], nll(ps))
+                # normalize nll by data length
+                nll(ps) < Inf && push!(pg.log["NLL"], nll(ps) / length(data))
             end
+        end
+        if epoch % 10 == 0
+            printstatus(getmemory(pg, rand(1:10))[1])
+            # printstatus(getmemory(pg, rand(1:length(pg.curriculum.currentdataset)))[1])
         end
         data_update!(pg, item)
     end
@@ -1191,16 +1197,43 @@ function smooth(xs, rate=0.99)
     return ys
 end
 
+function step_average(xs, n)
+    ys = Float[]
+    for i in 1:n:length(xs)
+        step_range = i:min(length(xs),i+n-1)
+        average = Float(sum(xs[step_range]) / length(step_range))
+        push!(ys, average)
+    end
+    return ys
+end
+
 "print the results"
-function summarize(pl::ParticleLearner, prs::Parser, smooth_rate)
+function summarize(pl::ParticleLearner, prs::Parser, dataset_size, smooth_rate)
     gm = prs.grammar
     for idx in 1:5
         printstatus(getmemory(pl, idx)[1])
     end
-    nll = smooth(pl.log["NLL"], smooth_rate)
-    p1 = plot(nll)
-    # display(p1)
-    p2 = histogram(filter(x->x>gm.alpha, reshape(gm.weight3d, :)), bins=10)
-    display(plot(p1, p2, layout=(2, 1)))
+    nll = smooth(step_average(pl.log["NLL"], dataset_size), smooth_rate)
+    p1 = plot(nll, label="NLL", size=(length(nll)*2, 200))
+    display(p1)
+    # savefig(p1, "plot.pdf")
+    # p2 = histogram(filter(x->x>gm.alpha, reshape(gm.weight3d, :)), bins=10)
+    # display(plot(p1, p2, layout=(2, 1)))
     println("Min NLL: ", minimum(nll))
+end
+
+"Save a grammar to file"
+function save(gm::DFGrammar, path)
+    JLD.save(path, 
+        "weight3d", gm.weight3d, 
+        "weight2d", gm.weight2d, 
+        "weight1d", gm.weight1d)
+end
+
+"Load a grammar from file"
+function load!(gm::DFGrammar, path)
+    d = JLD.load(path)
+    gm.weight3d = d["weight3d"]
+    gm.weight2d = d["weight2d"]
+    gm.weight1d = d["weight1d"]
 end
